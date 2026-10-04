@@ -109,6 +109,21 @@ def run_non_interactive(
     output_dir: Path = typer.Option(  # noqa: B008 - Typer option declaration
         ..., "--output-dir", help="Directory for the report and result.json"
     ),
+    deep_think_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_DEEP_THINK_LLM", "--deep-think-llm",
+        help="Override the deep-thinking model for this run only. With no quick "
+        "override, the whole run uses this model (quick inherits it too).",
+    ),
+    quick_think_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_QUICK_THINK_LLM", "--quick-think-llm",
+        help="Override the quick-thinking model for this run only.",
+    ),
+    trace_llm: bool = typer.Option(
+        False, "--trace-llm",
+        help="Save a complete, auditable trace of every LLM call (rendered "
+        "prompts, raw/parsed responses, timing, tokens) under <output-dir>/debug/. "
+        "Off by default; traces are not transmitted, only written locally.",
+    ),
 ):
     """Run one analysis without interactive prompts."""
     echo = timestamped_echo()
@@ -125,6 +140,9 @@ def run_non_interactive(
             output_dir=output_dir,
             progress=echo,
             progress_prefix=ticker,
+            deep_think_llm=deep_think_llm,
+            quick_think_llm=quick_think_llm,
+            trace_llm=trace_llm,
         )
     except Exception as exc:
         # A setup-time failure that never reached graph execution (bad config,
@@ -193,6 +211,21 @@ def batch_non_interactive(
     output_dir: Path | None = typer.Option(  # noqa: B008 - Typer option declaration
         None, "--output-dir", help=r"Batch output directory. Defaults to .\test\<date>."
     ),
+    deep_think_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_DEEP_THINK_LLM", "--deep-think-llm",
+        help="Override the deep-thinking model for this batch only. With no quick "
+        "override, the whole batch uses this model (quick inherits it too).",
+    ),
+    quick_think_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_QUICK_THINK_LLM", "--quick-think-llm",
+        help="Override the quick-thinking model for this batch only.",
+    ),
+    trace_llm: bool = typer.Option(
+        False, "--trace-llm",
+        help="Save a complete, auditable trace of every LLM call (rendered "
+        "prompts, raw/parsed responses, timing, tokens) under each ticker's "
+        "debug/ directory. Off by default.",
+    ),
 ):
     """Run multiple analyses sequentially without interactive prompts.
 
@@ -229,6 +262,9 @@ def batch_non_interactive(
             language=language,
             output_dir=output_dir,
             progress=echo,
+            deep_think_llm=deep_think_llm,
+            quick_think_llm=quick_think_llm,
+            trace_llm=trace_llm,
         )
     except Exception as exc:
         echo(f"Error: {exc}", err=True)

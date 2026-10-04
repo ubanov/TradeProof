@@ -6,6 +6,10 @@ import logging
 
 from tradingagents.agents.context import get_instrument_context_from_state, get_language_instruction
 from tradingagents.agents.managers.integrity_check import check_manager_integrity
+from tradingagents.agents.researchers.canonical_recovery import (
+    downstream_safe_text,
+    latest_side_recovery_status,
+)
 from tradingagents.agents.researchers.research_summary import render_repair_status_caveat
 from tradingagents.agents.researchers.setup_tags import render_setup_tags
 from tradingagents.agents.researchers.trade_metrics import (
@@ -30,11 +34,21 @@ def create_research_manager(llm):
     def research_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
         investment_debate_state = state["investment_debate_state"]
-        bull_initial = investment_debate_state.get("bull_initial") or investment_debate_state.get(
-            "bull_history", ""
+        # A fallback whose canonical recovery failed (UNAPPLIED) must not be
+        # read here as if it were live narrative evidence -- only its bare
+        # status is shown, never the failed fallback's own semantic content
+        # (a stray "conviction 57 -> 50" or "TP 240" in that prose). The full
+        # text is still preserved verbatim in bull_history/bear_history for
+        # report/audit/debug; this only affects what this prompt sees.
+        bull_initial = downstream_safe_text(
+            investment_debate_state.get("bull_initial")
+            or investment_debate_state.get("bull_history", ""),
+            investment_debate_state.get("bull_initial_recovery_status", "NOT_RUN"),
         )
-        bear_initial = investment_debate_state.get("bear_initial") or investment_debate_state.get(
-            "bear_history", ""
+        bear_initial = downstream_safe_text(
+            investment_debate_state.get("bear_initial")
+            or investment_debate_state.get("bear_history", ""),
+            investment_debate_state.get("bear_initial_recovery_status", "NOT_RUN"),
         )
         bull_repair = investment_debate_state.get("bull_repair", "")
         bear_repair = investment_debate_state.get("bear_repair", "")
@@ -67,10 +81,16 @@ def create_research_manager(llm):
             repair_structured_note=render_repair_status_caveat(investment_debate_state)
             or "No repair fell back to free text.",
             final_bull_response=bull_repair
-            or investment_debate_state.get("current_bull_response")
+            or downstream_safe_text(
+                investment_debate_state.get("current_bull_response", ""),
+                latest_side_recovery_status(investment_debate_state, "bull"),
+            )
             or bull_initial,
             final_bear_response=bear_repair
-            or investment_debate_state.get("current_bear_response")
+            or downstream_safe_text(
+                investment_debate_state.get("current_bear_response", ""),
+                latest_side_recovery_status(investment_debate_state, "bear"),
+            )
             or bear_initial,
             research_horizon=investment_debate_state.get("research_horizon", "not recorded"),
             setup_tags=render_setup_tags(investment_debate_state.get("setup_tags") or {}),

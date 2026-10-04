@@ -25,6 +25,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from tradingagents.agents.fallback_log import warn_fallback
+from tradingagents.llm_trace import record_structured_parse_result, traced_invoke
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +76,19 @@ def invoke_structured_or_freetext(
     """
     if structured_llm is not None:
         try:
-            result = structured_llm.invoke(prompt)
+            result = traced_invoke(structured_llm, prompt, attempt="structured")
             if result is None:
                 # A thinking model can answer in plain text instead of calling
                 # the tool, leaving the parser with nothing to return. Treat it
                 # as a structured miss and fall back, with a clear reason.
                 raise ValueError("structured output returned no parsed result")
+            record_structured_parse_result(
+                success=True,
+                parsed=result.model_dump(mode="json") if hasattr(result, "model_dump") else None,
+            )
             return render(result)
         except Exception as exc:
+            record_structured_parse_result(success=False, error=str(exc))
             warn_fallback(
                 logger,
                 f"{agent_name}: structured output unavailable; retrying once "
@@ -90,5 +96,5 @@ def invoke_structured_or_freetext(
                 detail=str(exc),
             )
 
-    response = plain_llm.invoke(prompt)
+    response = traced_invoke(plain_llm, prompt, attempt="fallback")
     return response.content

@@ -22,6 +22,7 @@ from tradingagents.agents import (
     create_trader,
 )
 from tradingagents.agents.state import AgentState
+from tradingagents.llm_trace import traced_node
 
 from .analyst_execution import build_analyst_execution_plan
 from .conditional_logic import ConditionalLogic
@@ -104,23 +105,27 @@ class GraphSetup:
 
         workflow = StateGraph(AgentState)
 
+        # Every LLM-invoking node is wrapped with traced_node: the only touch
+        # point LLM trace mode needs here. It tags every call made while the
+        # node runs with the node's own name (read by LLMTraceCallbackHandler
+        # when attached) and is a no-op otherwise -- see llm_trace.py.
         for spec in plan.specs:
-            workflow.add_node(spec.agent_node, analyst_factories[spec.key]())
+            workflow.add_node(spec.agent_node, traced_node(spec.agent_node, analyst_factories[spec.key]()))
             workflow.add_node(spec.clear_node, create_msg_delete())
             if spec.tools:
                 workflow.add_node(spec.tool_node, ToolNode(list(spec.tools)))
 
-        workflow.add_node("Bull Researcher", bull_researcher_node)
-        workflow.add_node("Bear Researcher", bear_researcher_node)
-        workflow.add_node("Research Verifier", research_verifier_node)
-        workflow.add_node("Bull Repair", bull_repair_node)
-        workflow.add_node("Bear Repair", bear_repair_node)
-        workflow.add_node("Research Manager", research_manager_node)
-        workflow.add_node("Trader", trader_node)
-        workflow.add_node("Aggressive Analyst", aggressive_analyst)
-        workflow.add_node("Neutral Analyst", neutral_analyst)
-        workflow.add_node("Conservative Analyst", conservative_analyst)
-        workflow.add_node("Portfolio Manager", portfolio_manager_node)
+        workflow.add_node("Bull Researcher", traced_node("Bull Researcher", bull_researcher_node))
+        workflow.add_node("Bear Researcher", traced_node("Bear Researcher", bear_researcher_node))
+        workflow.add_node("Research Verifier", traced_node("Research Verifier", research_verifier_node))
+        workflow.add_node("Bull Repair", traced_node("Bull Repair", bull_repair_node))
+        workflow.add_node("Bear Repair", traced_node("Bear Repair", bear_repair_node))
+        workflow.add_node("Research Manager", traced_node("Research Manager", research_manager_node))
+        workflow.add_node("Trader", traced_node("Trader", trader_node))
+        workflow.add_node("Aggressive Analyst", traced_node("Aggressive Analyst", aggressive_analyst))
+        workflow.add_node("Neutral Analyst", traced_node("Neutral Analyst", neutral_analyst))
+        workflow.add_node("Conservative Analyst", traced_node("Conservative Analyst", conservative_analyst))
+        workflow.add_node("Portfolio Manager", traced_node("Portfolio Manager", portfolio_manager_node))
 
         workflow.add_edge(START, plan.specs[0].agent_node)
 

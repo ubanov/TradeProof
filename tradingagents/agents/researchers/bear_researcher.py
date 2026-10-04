@@ -66,7 +66,7 @@ def create_bear_researcher(llm):
             )
             prompt += get_language_instruction()
 
-            rendered, thesis_dict = invoke_initial_thesis(
+            rendered, thesis_dict, initial_recovery_status = invoke_initial_thesis(
                 structured_initial_llm, llm, prompt, "Bear Researcher"
             )
             argument = f"Bear Analyst (Initial): {rendered}"
@@ -79,6 +79,7 @@ def create_bear_researcher(llm):
                     "count": investment_debate_state.get("count", 0) + 1,
                     "bear_initial": argument,
                     "current_bear_response": argument,
+                    "bear_initial_recovery_status": initial_recovery_status,
                 }
             )
             if thesis_dict is not None:
@@ -122,8 +123,12 @@ def create_bear_researcher(llm):
             )
             prompt += get_language_instruction()
 
-            rendered, review_dict = invoke_review(
-                structured_review_llm, llm, prompt, "Bear Researcher"
+            rendered, review_dict, review_recovery_status = invoke_review(
+                structured_review_llm,
+                llm,
+                prompt,
+                "Bear Researcher",
+                prior_thesis=investment_debate_state.get("bear_thesis"),
             )
             argument = f"Bear Analyst (Review {review_round}): {rendered}"
 
@@ -149,6 +154,7 @@ def create_bear_researcher(llm):
                     "bear_rebuttal_count": investment_debate_state.get("bear_rebuttal_count", 0)
                     + 1,
                     "debate_round": investment_debate_state.get("debate_round", 0) + 1,
+                    "bear_review_recovery_status": review_recovery_status,
                 }
             )
             if review_dict is not None:

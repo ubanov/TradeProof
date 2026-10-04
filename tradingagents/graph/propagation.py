@@ -68,6 +68,10 @@ class Propagator:
                     "bear_repair": "",
                     "bull_repair_structured_status": "NOT_RUN",
                     "bear_repair_structured_status": "NOT_RUN",
+                    "bull_initial_recovery_status": "NOT_RUN",
+                    "bear_initial_recovery_status": "NOT_RUN",
+                    "bull_review_recovery_status": "NOT_RUN",
+                    "bear_review_recovery_status": "NOT_RUN",
                     "research_horizon": get_config().get(
                         "research_horizon", DEFAULT_CONFIG["research_horizon"]
                     ),

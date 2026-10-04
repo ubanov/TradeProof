@@ -173,7 +173,12 @@ def test_fail_runs_one_repair_and_one_second_verification_then_stops():
     assert debate["repair_rounds"] == MAX_REPAIR_ROUNDS == 1
     assert debate["repaired_agents"] == ["bull", "bear"]
     assert debate["debate_round"] == 2
-    assert len(bull_llm.prompts) == len(bear_llm.prompts) == 1
+    # One repair content call each, plus one canonical-recovery attempt each
+    # (the repair text above is not valid recovery JSON, so recovery fails and
+    # bull_thesis/bear_thesis stay untouched -- see test_structured_repair.py
+    # for that non-degradation guarantee; this test is only about repair
+    # running exactly once, not twice).
+    assert len(bull_llm.prompts) == len(bear_llm.prompts) == 2
     assert "corrected Bull position" in verifier_llm.prompts[1]
     assert "corrected Bear position" in verifier_llm.prompts[1]
     assert "Computed result: 3126.56" in bull_llm.prompts[0]

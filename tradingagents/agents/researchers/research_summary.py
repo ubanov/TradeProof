@@ -30,10 +30,18 @@ def render_research_context_summary(debate: dict) -> str:
         trail = " -> ".join(str(value) for value in history) if history else "not recorded"
         risk_unit = thesis.get("suggested_risk_unit", "not recorded")
         metrics = trade_metrics_from_dict(debate.get(f"{side}_trade_metrics"))
+        initial_recovery = debate.get(f"{side}_initial_recovery_status") or "NOT_RUN"
+        review_recovery = debate.get(f"{side}_review_recovery_status") or "NOT_RUN"
         lines += [
             "",
             f"**{side.title()} Conviction Trail**: {trail} "
             "(self-assessed evidence strength, not a probability)",
+            f"**{side.title()} Canonical Recovery**: initial={initial_recovery}, "
+            f"review={review_recovery} (NOT_NEEDED/APPLIED = structured or "
+            "fallback-recovered state below is authoritative; UNAPPLIED = a "
+            "fallback could not be recovered and is excluded from the "
+            "structured state below, visible only as narrative text elsewhere "
+            "in this report)",
             f"**{side.title()} Suggested Risk Unit**: {risk_unit} "
             "(research-level signal only, not a position size or portfolio percentage)",
             f"**{side.title()} Trade Metrics**:",
@@ -72,6 +80,31 @@ def render_repair_status_caveat(debate: dict) -> str:
     return "\n".join(notes)
 
 
+def render_recovery_status_caveat(debate: dict) -> str:
+    """A short caveat when a Bull/Bear textual fallback's canonical recovery
+    failed: the structured trade plan/conviction below was never updated by
+    that fallback (it still reflects the last valid canonical state, or is
+    unavailable if the fallback was the INITIAL thesis), so a consumer must
+    not treat the fallback's prose as if it were authoritative.
+    """
+    notes = []
+    for side in ("bull", "bear"):
+        if debate.get(f"{side}_initial_recovery_status") == "UNAPPLIED":
+            notes.append(
+                f"Note: {side.title()}'s initial thesis fell back to free text and "
+                f"its canonical recovery failed -- no structured trade plan/"
+                f"conviction is recorded for {side.title()} from that call."
+            )
+        if debate.get(f"{side}_review_recovery_status") == "UNAPPLIED":
+            notes.append(
+                f"Note: {side.title()}'s latest review fell back to free text and "
+                f"its canonical recovery failed -- the structured trade plan/"
+                f"conviction below reflects the last successful review, not "
+                f"that fallback's prose."
+            )
+    return "\n".join(notes)
+
+
 def _entry_text(entry: dict) -> str:
     if not entry:
         return "not set"
@@ -92,7 +125,11 @@ def render_trade_plan_for_trader(debate: dict) -> str:
     this shows exactly the levels and deterministic metrics a Trader needs to
     ground its own proposal in, for each side, with no raw JSON.
     """
-    caveat = render_repair_status_caveat(debate)
+    caveat = "\n".join(
+        note
+        for note in (render_repair_status_caveat(debate), render_recovery_status_caveat(debate))
+        if note
+    )
 
     if not debate.get("bull_thesis") and not debate.get("bear_thesis"):
         base = (

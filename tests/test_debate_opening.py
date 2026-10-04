@@ -29,9 +29,16 @@ _REPORTS = {
 
 
 def _capturing_llm(captured: dict):
+    """``llm.with_structured_output`` auto-succeeds on a bare ``MagicMock``
+    (returning another mock rather than raising), so the structured attempt
+    always "succeeds" into unparseable output and falls back to free text --
+    which now also triggers one canonical-recovery call on this same object
+    (see ``researchers/thesis_flow.py``). The real content-generation prompt
+    is always the first call recorded here; recovery's own small JSON-only
+    prompt follows it, also captured for tests that want to inspect it."""
     llm = MagicMock()
     llm.invoke.side_effect = lambda prompt: (
-        captured.__setitem__("prompt", prompt) or MagicMock(content="argument")
+        captured.setdefault("prompts", []).append(prompt) or MagicMock(content="argument")
     )
     return llm
 
@@ -62,7 +69,7 @@ def test_helper_marks_empty_and_passes_through():
 def test_researcher_initial_thesis_has_no_phantom_opponent(factory):
     captured = {}
     factory(_capturing_llm(captured))(_investment_state(""))
-    assert "independent initial thesis" in captured["prompt"]
+    assert "independent initial thesis" in captured["prompts"][0]
 
 
 @pytest.mark.unit
@@ -78,4 +85,4 @@ def test_researcher_passes_real_opponent_argument():
         "debate_round": 0,
     })
     create_bull_researcher(_capturing_llm(captured))(state)
-    assert "valuation is stretched" in captured["prompt"]
+    assert "valuation is stretched" in captured["prompts"][0]

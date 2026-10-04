@@ -35,6 +35,12 @@ from tradingagents.graph.analyst_execution import (
     build_analyst_execution_plan,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.llm_trace import (
+    LLMTraceCallbackHandler,
+    set_active_tracer,
+    snapshot_prompts,
+    write_run_manifest,
+)
 from tradingagents.reporting import write_report_tree
 
 logger = logging.getLogger(__name__)
@@ -229,6 +235,47 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     return config
 
 
+def _start_llm_trace(
+    *, trace_llm: bool, output_dir: Path | None, ticker: str, analysis_date: str,
+    selected_analysts: list[str], config: dict,
+) -> LLMTraceCallbackHandler | None:
+    """Set up opt-in LLM trace mode for this run, or explicitly clear any
+    tracer left active by a previous ticker in the same batch process.
+
+    Always called (even when trace_llm is False): contextvars persist across
+    sequential calls in the same thread, so a batch run that traces ticker 1
+    but not ticker 2 must not leak ticker 1's tracer into ticker 2.
+    """
+    if not trace_llm or output_dir is None:
+        set_active_tracer(None)
+        return None
+
+    debug_dir = Path(output_dir) / "debug"
+    tracer = LLMTraceCallbackHandler(debug_dir)
+    set_active_tracer(tracer)
+    print(f"[DEBUG] LLM trace enabled: {debug_dir}", flush=True)
+
+    def _on_warn(path: Path, exc: Exception) -> None:
+        print(f"[WARN] LLM trace: failed to write {path} ({exc}); continuing.", flush=True)
+
+    prompt_hashes = snapshot_prompts(debug_dir, _on_warn)
+    write_run_manifest(
+        debug_dir,
+        ticker=ticker,
+        analysis_date=analysis_date,
+        depth=config.get("max_risk_discuss_rounds"),
+        analysts=selected_analysts,
+        language=config.get("output_language", "English"),
+        provider=config.get("llm_provider", ""),
+        effective_deep_model=config.get("deep_think_llm", ""),
+        effective_quick_model=config.get("quick_think_llm", ""),
+        config=config,
+        prompt_hashes=prompt_hashes,
+        on_warn=_on_warn,
+    )
+    return tracer
+
+
 def execute_analysis(
     *,
     ticker: str,
@@ -241,6 +288,7 @@ def execute_analysis(
     stats_handler: StatsCallbackHandler | None = None,
     on_chunk: Callable[[dict], None] | None = None,
     on_checkpoint: Callable[[TradingAgentsGraph], None] | None = None,
+    trace_llm: bool = False,
 ) -> AnalysisExecution:
     """Run one analysis through the shared interactive/headless execution path."""
     # Per-ticker, not per-process: a batch run must not accumulate one running
@@ -248,11 +296,16 @@ def execute_analysis(
     reset_fallback_count()
     build_analyst_execution_plan(selected_analysts)
     stats_handler = stats_handler or StatsCallbackHandler()
+    tracer = _start_llm_trace(
+        trace_llm=trace_llm, output_dir=output_dir, ticker=ticker,
+        analysis_date=analysis_date, selected_analysts=selected_analysts, config=config,
+    )
+    callbacks = [stats_handler] + ([tracer] if tracer is not None else [])
     graph = TradingAgentsGraph(
         selected_analysts,
         config=config,
         debug=True,
-        callbacks=[stats_handler],
+        callbacks=callbacks,
     )
     started = time.monotonic()
     init_agent_state = graph.create_run_state(
@@ -298,6 +351,11 @@ def execute_analysis(
 
     duration_seconds = time.monotonic() - started
     stats = stats_handler.get_stats()
+    if tracer is not None:
+        tracer.write_summary(
+            stats=stats, elapsed_seconds=duration_seconds,
+            deep_model=config.get("deep_think_llm", ""), quick_model=config.get("quick_think_llm", ""),
+        )
 
     if stream_error is not None:
         failure_stage = infer_failure_stage(final_state)

@@ -81,7 +81,10 @@ def _create_research_repair(llm, side: str):
             ),
         ) + get_language_instruction()
 
-        rendered, review_dict = invoke_review(structured_llm, llm, prompt, f"{side} Repair")
+        rendered, review_dict, _recovery_status = invoke_review(
+            structured_llm, llm, prompt, f"{side} Repair",
+            prior_thesis=debate.get(f"{side_key}_thesis"),
+        )
         repair_round = debate.get("repair_rounds", 0) + 1
         repaired = f"{side} Analyst (Repair {repair_round}): {rendered}"
 

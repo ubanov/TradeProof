@@ -21,6 +21,11 @@ from __future__ import annotations
 import logging
 
 from tradingagents.agents.fallback_log import warn_fallback
+from tradingagents.agents.researchers.canonical_recovery import (
+    CanonicalRecoveryStatus,
+    recover_initial_thesis,
+    recover_review_patch,
+)
 from tradingagents.agents.researchers.trade_metrics import (
     compute_trade_metrics,
     entry_reference as _entry_reference,
@@ -31,48 +36,105 @@ from tradingagents.agents.schemas import (
     render_initial_thesis,
     render_review_outcome,
 )
+from tradingagents.llm_trace import record_structured_parse_result, traced_invoke
 
 logger = logging.getLogger(__name__)
 
+# Appended to the rendered fallback text when its canonical recovery failed,
+# so every later stage that reads this text directly (Research Manager,
+# Verifier -- see fork README: "Canonical recovery for Research fallbacks")
+# sees unambiguously that it is narrative only, never authoritative state,
+# with no change required to those stages' own prompts/code.
+NON_CANONICAL_NOTE = (
+    "\n\n[NON-CANONICAL: this fallback text could not be converted into "
+    "structured canonical state (canonical recovery failed); treat it as "
+    "narrative only, not as an authoritative conviction/trade-plan update.]"
+)
+
 
 def invoke_initial_thesis(structured_llm, plain_llm, prompt, agent_name: str):
-    """Return ``(rendered_markdown, thesis_dict_or_None)``."""
+    """Return ``(rendered_markdown, thesis_dict_or_None, recovery_status)``.
+
+    ``recovery_status`` is a ``CanonicalRecoveryStatus.value`` string:
+    ``NOT_NEEDED`` when structured output succeeded directly, or
+    ``APPLIED``/``UNAPPLIED`` when it fell back to free text and canonical
+    recovery did/did not manage to reconstruct a minimal canonical thesis
+    from that text (see ``canonical_recovery.py``).
+    """
     if structured_llm is not None:
         try:
-            result = structured_llm.invoke(prompt)
+            result = traced_invoke(structured_llm, prompt, attempt="structured")
             if result is None:
                 raise ValueError("structured output returned no parsed result")
             if not isinstance(result, InitialResearchThesis):
                 result = InitialResearchThesis.model_validate(result)
-            return render_initial_thesis(result), result.model_dump(mode="json")
+            record_structured_parse_result(success=True, parsed=result.model_dump(mode="json"))
+            return (
+                render_initial_thesis(result),
+                result.model_dump(mode="json"),
+                CanonicalRecoveryStatus.NOT_NEEDED.value,
+            )
         except Exception as exc:
+            record_structured_parse_result(success=False, error=str(exc))
             warn_fallback(
                 logger,
                 f"{agent_name}: structured initial thesis unavailable; "
                 "continuing with free-text fallback.",
                 detail=str(exc),
             )
-    return plain_llm.invoke(prompt).content, None
+    fallback_text = traced_invoke(plain_llm, prompt, attempt="fallback").content
+    thesis_dict, status = recover_initial_thesis(fallback_text, plain_llm, agent_name)
+    if status is CanonicalRecoveryStatus.UNAPPLIED:
+        warn_fallback(
+            logger,
+            f"{agent_name}: fallback canonical recovery failed; canonical state unchanged.",
+        )
+        return fallback_text + NON_CANONICAL_NOTE, thesis_dict, status.value
+    logger.debug("%s: fallback canonical recovery applied.", agent_name)
+    return fallback_text, thesis_dict, status.value
 
 
-def invoke_review(structured_llm, plain_llm, prompt, agent_name: str):
-    """Return ``(rendered_markdown, review_dict_or_None)``."""
+def invoke_review(
+    structured_llm, plain_llm, prompt, agent_name: str, prior_thesis: dict | None = None
+):
+    """Return ``(rendered_markdown, review_dict_or_None, recovery_status)``.
+
+    ``prior_thesis`` is the side's current canonical thesis dict (if any),
+    passed through to canonical recovery so a fallback review can be
+    represented as a patch over it -- never reconstructed from scratch. See
+    ``invoke_initial_thesis`` for ``recovery_status``'s meaning.
+    """
     if structured_llm is not None:
         try:
-            result = structured_llm.invoke(prompt)
+            result = traced_invoke(structured_llm, prompt, attempt="structured")
             if result is None:
                 raise ValueError("structured output returned no parsed result")
             if not isinstance(result, ResearchReviewOutcome):
                 result = ResearchReviewOutcome.model_validate(result)
-            return render_review_outcome(result), result.model_dump(mode="json")
+            record_structured_parse_result(success=True, parsed=result.model_dump(mode="json"))
+            return (
+                render_review_outcome(result),
+                result.model_dump(mode="json"),
+                CanonicalRecoveryStatus.NOT_NEEDED.value,
+            )
         except Exception as exc:
+            record_structured_parse_result(success=False, error=str(exc))
             warn_fallback(
                 logger,
                 f"{agent_name}: structured review unavailable; continuing "
                 "with free-text fallback.",
                 detail=str(exc),
             )
-    return plain_llm.invoke(prompt).content, None
+    fallback_text = traced_invoke(plain_llm, prompt, attempt="fallback").content
+    review_dict, status = recover_review_patch(fallback_text, prior_thesis, plain_llm, agent_name)
+    if status is CanonicalRecoveryStatus.UNAPPLIED:
+        warn_fallback(
+            logger,
+            f"{agent_name}: fallback canonical recovery failed; canonical state unchanged.",
+        )
+        return fallback_text + NON_CANONICAL_NOTE, review_dict, status.value
+    logger.debug("%s: fallback canonical recovery applied.", agent_name)
+    return fallback_text, review_dict, status.value
 
 
 def _entry_field(action: str, old_entry: dict, new_value) -> dict:

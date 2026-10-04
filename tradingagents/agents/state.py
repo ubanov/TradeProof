@@ -48,6 +48,26 @@ class InvestDebateState(TypedDict):
     bear_repair_structured_status: Annotated[
         str, "APPLIED/TEXT_ONLY/NOT_RUN: whether Bear's repair updated bear_thesis"
     ]
+    bull_initial_recovery_status: Annotated[
+        str,
+        "NOT_NEEDED/APPLIED/UNAPPLIED/NOT_RUN: whether Bull's initial-thesis "
+        "textual fallback was reconstructed into canonical bull_thesis",
+    ]
+    bear_initial_recovery_status: Annotated[
+        str,
+        "NOT_NEEDED/APPLIED/UNAPPLIED/NOT_RUN: whether Bear's initial-thesis "
+        "textual fallback was reconstructed into canonical bear_thesis",
+    ]
+    bull_review_recovery_status: Annotated[
+        str,
+        "NOT_NEEDED/APPLIED/UNAPPLIED/NOT_RUN: whether Bull's latest review "
+        "textual fallback was reconstructed into a canonical trade-plan patch",
+    ]
+    bear_review_recovery_status: Annotated[
+        str,
+        "NOT_NEEDED/APPLIED/UNAPPLIED/NOT_RUN: whether Bear's latest review "
+        "textual fallback was reconstructed into a canonical trade-plan patch",
+    ]
     manager_integrity_status: Annotated[
         str, "PASS/WARN from the deterministic post-manager integrity check"
     ]

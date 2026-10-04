@@ -69,6 +69,50 @@ def _apply_env_overrides(config: dict) -> dict:
     return config
 
 
+def resolve_effective_models(
+    config: dict, cli_deep: str | None = None, cli_quick: str | None = None
+) -> tuple[str, str]:
+    """Single source of truth for which deep/quick model a run actually uses.
+
+    ``cli_deep``/``cli_quick`` are CLI-flag values; ``None`` means the flag was
+    not given at all. An explicitly given but empty/whitespace CLI quick value
+    (``--TRADINGAGENTS_QUICK_THINK_LLM=""``) is treated the same as "no quick
+    override", not as "configured quick".
+
+    Resolution order for quick:
+    1. An explicit, non-empty CLI quick override always wins.
+    2. Otherwise, if a CLI deep override was given, quick follows it too --
+       passing one model flag is meant to run the entire analysis on that
+       model unless a quick override is explicitly supplied.
+    3. Otherwise, the configured quick model, if it is non-empty (existing
+       user configs with a distinct quick model keep working unchanged).
+    4. Otherwise, quick inherits whatever deep resolved to.
+    """
+    configured_deep = (config.get("deep_think_llm") or "").strip()
+    configured_quick = (config.get("quick_think_llm") or "").strip()
+
+    cli_deep_clean = (cli_deep or "").strip()
+    cli_quick_given = cli_quick is not None
+    cli_quick_clean = (cli_quick or "").strip()
+
+    effective_deep = cli_deep_clean or configured_deep
+
+    if cli_quick_given and cli_quick_clean:
+        effective_quick = cli_quick_clean
+    elif cli_quick_given:
+        # Explicitly given but empty/whitespace: inherit deep, not configured_quick.
+        effective_quick = effective_deep
+    elif cli_deep_clean:
+        # A deep override with no quick override at all: the whole run follows it.
+        effective_quick = effective_deep
+    elif configured_quick:
+        effective_quick = configured_quick
+    else:
+        effective_quick = effective_deep
+
+    return effective_deep, effective_quick
+
+
 DEFAULT_CONFIG = _apply_env_overrides({
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR") or os.path.join(_TRADINGAGENTS_HOME, "logs"),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR") or os.path.join(_TRADINGAGENTS_HOME, "cache"),

@@ -13,6 +13,7 @@ import logging
 
 from tradingagents.agents.fallback_log import warn_fallback
 from tradingagents.agents.schemas import RiskStanceAssessment, render_risk_assessment
+from tradingagents.llm_trace import record_structured_parse_result, traced_invoke
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +27,12 @@ def invoke_risk_assessment(structured_llm, plain_llm, prompt, agent_name: str):
     """
     if structured_llm is not None:
         try:
-            result = structured_llm.invoke(prompt)
+            result = traced_invoke(structured_llm, prompt, attempt="structured")
             if result is None:
                 raise ValueError("structured output returned no parsed result")
             if not isinstance(result, RiskStanceAssessment):
                 result = RiskStanceAssessment.model_validate(result)
+            record_structured_parse_result(success=True, parsed=result.model_dump(mode="json"))
             return (
                 render_risk_assessment(result),
                 result.risk_level,
@@ -38,10 +40,11 @@ def invoke_risk_assessment(structured_llm, plain_llm, prompt, agent_name: str):
                 result.model_dump(mode="json"),
             )
         except Exception as exc:
+            record_structured_parse_result(success=False, error=str(exc))
             warn_fallback(
                 logger,
                 f"{agent_name}: structured risk assessment unavailable; "
                 "continuing with free-text fallback.",
                 detail=str(exc),
             )
-    return plain_llm.invoke(prompt).content, None, None, None
+    return traced_invoke(plain_llm, prompt, attempt="fallback").content, None, None, None

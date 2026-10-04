@@ -9,18 +9,34 @@ import pytest
 from tradingagents.agents.managers.research_manager import create_research_manager
 from tradingagents.agents.researchers.bear_researcher import create_bear_researcher
 from tradingagents.agents.researchers.bull_researcher import create_bull_researcher
+from tradingagents.agents.researchers.canonical_recovery import RECOVERY_PROMPT_MARKER
 from tradingagents.agents.schemas import PortfolioRating, ResearchPlan
 from tradingagents.graph.conditional_logic import ConditionalLogic
 from tradingagents.graph.propagation import Propagator
 
 
 class _ResearchLLM:
+    """No ``with_structured_output``, so every call here is a Research textual
+    fallback: ``invoke_initial_thesis``/``invoke_review`` (see
+    ``researchers/thesis_flow.py``) follow every such call with one canonical-
+    recovery call on this same object, asking for plain JSON. This fake
+    answers that JSON request with plain, non-JSON prose (it is never valid
+    recovery JSON on purpose -- these tests are about the free-text content
+    itself, not canonical recovery), and keeps it out of ``self.prompts``/
+    ``self.responses`` indexing so every assertion below keeps addressing the
+    real per-round content call it always has.
+    """
+
     def __init__(self, prefix: str, responses: list[str] | None = None):
         self.prefix = prefix
         self.responses = responses or []
         self.prompts: list[str] = []
+        self.recovery_prompts: list[str] = []
 
     def invoke(self, prompt):
+        if RECOVERY_PROMPT_MARKER in prompt:
+            self.recovery_prompts.append(prompt)
+            return SimpleNamespace(content="not a recovery JSON object")
         self.prompts.append(prompt)
         index = len(self.prompts) - 1
         content = (
@@ -155,6 +171,13 @@ def test_bull_and_bear_review_prompts_are_collaborative_but_distinct():
 
 @pytest.mark.unit
 def test_research_manager_receives_initial_theses_and_rebuttal_history():
+    """``_ResearchLLM`` never achieves structured output or canonical
+    recovery (see its docstring), so every one of its turns is an UNAPPLIED
+    textual fallback: Research Manager's own context construction must show
+    only the bare UNAPPLIED marker for them, never this raw, un-anchored
+    prose (see test_canonical_recovery.py's acceptance tests for the
+    APPLIED/structured-success counterexamples where real content does
+    reach the manager)."""
     state = _state()
     bull_llm = _ResearchLLM("BULL")
     bear_llm = _ResearchLLM("BEAR")
@@ -166,8 +189,8 @@ def test_research_manager_receives_initial_theses_and_rebuttal_history():
     create_research_manager(manager_llm)(state)
     prompt = manager_llm.prompts[0]
     for marker in ("BULL_1", "BEAR_1", "BULL_2", "BEAR_2"):
-        assert marker in prompt
-    assert prompt.index("BULL_1") < prompt.index("BEAR_1") < prompt.index("BULL_2")
+        assert marker not in prompt
+    assert "NON-CANONICAL FALLBACK UNAPPLIED" in prompt
     assert "complementary research roles" in prompt
     assert "reduced conviction after valid counterevidence" in prompt
     assert "unresolved disagreements as useful information" in prompt
@@ -195,11 +218,18 @@ def test_accepted_correction_persists_in_later_reviews_and_manager_context():
     manager_llm = _ManagerLLM()
     create_research_manager(manager_llm)(state)
     manager_prompt = manager_llm.prompts[0]
+    # The classified correction persists into the manager's context either
+    # way (review_outcomes is a classification signal, not raw fallback
+    # prose). But bull/bear's own initial/final text here never achieved
+    # canonical recovery (_ResearchLLM, see its docstring), so Research
+    # Manager's context construction shows only the UNAPPLIED marker for
+    # those, never this raw, un-anchored prose.
     assert correction in manager_prompt
-    assert "bull initial" in manager_prompt
-    assert "bear initial" in manager_prompt
-    assert "bull final" in manager_prompt
-    assert "bear final" in manager_prompt
+    assert "NON-CANONICAL FALLBACK UNAPPLIED" in manager_prompt
+    assert "bull initial" not in manager_prompt
+    assert "bear initial" not in manager_prompt
+    assert "bull final" not in manager_prompt
+    assert "bear final" not in manager_prompt
 
 
 @pytest.mark.unit

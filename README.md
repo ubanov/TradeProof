@@ -284,6 +284,62 @@
   tradingagents batch --tickers NVDA,SPY,BTC-USD
   ```
 
+### Model overrides and LLM trace mode
+
+Useful when comparing local Ollama models against each other on the exact
+same ticker/date/analysts/depth/language.
+
+- **Per-run model overrides** (`run` and `batch`): `--TRADINGAGENTS_DEEP_THINK_LLM`
+  and `--TRADINGAGENTS_QUICK_THINK_LLM` (friendly aliases `--deep-think-llm`/
+  `--quick-think-llm` also work) override the configured models for that
+  invocation only, without touching `.env`. Quick inherits deep when no quick
+  override/config value is set — passing one model flag runs the entire
+  analysis on that model:
+
+  ```bash
+  # One model for everything this run:
+  tradingagents batch --tickers NVDA --date 2026-09-30 \
+    --analysts market,social,news,fundamentals --depth medium --language Spanish \
+    --TRADINGAGENTS_DEEP_THINK_LLM=gpt-oss:20b
+
+  # Two distinct models:
+  tradingagents batch --tickers NVDA --date 2026-09-30 \
+    --TRADINGAGENTS_DEEP_THINK_LLM=qwen3.8-flash-next:125b-a6b-q4_K_M \
+    --TRADINGAGENTS_QUICK_THINK_LLM=gpt-oss:20b
+  ```
+
+  An existing `.env`/config with a distinct, non-empty quick model keeps
+  working unchanged when no CLI override is given — resolution order is:
+  explicit CLI quick override → quick follows a CLI deep override when no
+  quick override was given → configured quick model → inherit deep. The
+  resolved deep/quick models are printed at startup (`Deep model: ...` /
+  `Quick model: ...`) and recorded in the LLM trace manifest below, so both
+  always agree.
+
+- **`--trace-llm`** (`run` and `batch`, off by default): saves a complete,
+  auditable trace of every LLM call under `<output-dir>/<ticker>/debug/` —
+  `run_manifest.json` (effective models, provider, prompt-file hashes, git
+  commit/branch, package version), a snapshot of the prompt files actually in
+  effect for the run (`prompts/`, since a long run's prompt files can change
+  on disk mid-run), and one `calls/NNN_<stage>[_<attempt>]/` directory per LLM
+  call with the exact rendered request, the raw response, the parsed
+  structured result (or a recorded parse failure — never a fabricated one),
+  and timing/token metadata. Credential-shaped configuration keys (`api_key`,
+  `authorization`, `token`, `secret`, `password`, ...) are redacted; prompt
+  and response text never is. A `trace_summary.json` aggregates call counts
+  for quick before/after comparison. Normal console output is unaffected
+  beyond one `[DEBUG] LLM trace enabled: <path>` line; a trace-write failure
+  degrades to a `[WARN]` and never aborts the analysis.
+
+  ```bash
+  tradingagents batch --tickers NVDA --date 2026-09-30 \
+    --TRADINGAGENTS_DEEP_THINK_LLM=gpt-oss:20b --trace-llm
+  ```
+
+  **Trace output contains full prompts and model outputs.** Treat it as a
+  potentially sensitive analysis artifact — credentials are redacted, but the
+  analysis content itself is not.
+
 ### Risk as independent assessment, not a second debate
 
 Real validation runs (GLD, NVDA, SPY) showed the Risk phase behaving like a
@@ -422,6 +478,182 @@ audit, applied on top of upstream behavior:
   users to ignore red output even though the pipeline was continuing
   normally. A genuine failure still surfaces through the existing
   stderr/failure path unchanged.
+
+
+## Local LLM benchmark
+
+Fixed scenario used for the comparison:
+
+- Ticker: NVDA
+- Analysis date: 2026-09-30
+- Analysts: market, social, news, fundamentals
+- Research depth: Medium
+- Language: Spanish
+- Same TradingAgents revision and prompts for all runs
+
+> Results represent a single end-to-end run per model and should be interpreted
+> as practical observations on this hardware, not as general model benchmarks.
+
+| Model | Architecture | Runtime | LLM calls | Tool calls | Input tokens | Output tokens | Fallback warnings | Verification | Final decision | Observed suitability |
+|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| Qwen3.8-Flash-Next 125B A6B | MoE (~6B active) | 03:11:00 | 32 | 24 | 460,610 | 135,193 | 8 | WARN, no repair | Hold / REDUCE_RISK | Best observed quality; preferred for final validation / production runs |
+| Gemma 4 26B A4B | MoE (~4B active) | 00:34:45 | 42 | 16 | 299,298 | 102,234 | 14 | WARN, no repair | Hold / KEEP | Very good development model; fast and reasonably disciplined |
+| GPT-OSS 120B | large MoE | 01:30:44 | 56 | 14 | 407,550 | 64,234 | 19 | WARN, 1 repair | Buy / REDUCE_RISK | Good reasoning speed, but weak structured-output and provenance discipline |
+| GPT-OSS 20B | small/fast | 00:15:51 | 52 | 16 | 338,687 | 57,220 | 17 | WARN, no repair | Buy / REDUCE_RISK | Useful for smoke/stress tests; quality insufficient for final analysis |
+| Qwen3.8 27B | Dense | 14:13:15 | 36 | 24 | 542,922 | 139,287 | 9 | FAIL after repair | Overweight / KEEP | High analytical quality but impractical on this hardware |
+
+### Practical model selection
+
+- **Final analysis / validation:** Qwen3.8-Flash-Next 125B A6B
+- **Full development runs:** Gemma 4 26B A4B
+- **Fast smoke / guardrail tests:** GPT-OSS 20B
+- **Not currently preferred:** GPT-OSS 120B
+- **Discarded for this hardware:** Qwen3.8 27B dense
+
+### Pipeline cost and token volume
+
+> **Project version: 0.8.0** — the figures below were measured against this
+> exact revision. If this section is read from a later version, treat it as
+> historical: it documents the cost profile of the architecture as it stood
+> at 0.8.0, not of whatever version is current now.
+
+A `Medium`-depth analysis with every analyst enabled is **not a single LLM
+call** — it is dozens of coordinated calls across analysts, an independent
+Bull/Bear debate, verification, risk assessment, and portfolio decision-making
+(see "Why this uses so many tokens" below). Even a modest batch of tickers can
+generate millions of tokens. Keep in mind that:
+
+- execution time depends heavily on hardware;
+- it also depends on inference backend, quantization, and the CPU/GPU split;
+- **token count is a better measure of the actual work the pipeline does**
+  than wall-clock time, since it is far less hardware-dependent;
+- the numbers below are local observations on one machine, not general
+  benchmarks of the models involved.
+
+#### Measured Gemma 4 26B stress test (12-ticker batch)
+
+`gemma4:26b` is used here for **development / stress testing**, not as a
+recommended production or maximum-quality model (see "Current model roles"
+below).
+
+Configuration:
+
+- Analysis date: 2026-09-30
+- Research depth: Medium
+- Language: Spanish
+- Analysts: Market, Social/Sentiment, News, Fundamentals
+- Tickers: NVDA, AMD, AAPL, MSFT, AMZN, META, TSLA, JPM, XOM, LLY, SPY, BTC-USD
+
+Results:
+
+| Metric | Total | Average per ticker |
+|---|---:|---:|
+| Tickers analyzed | 12 | — |
+| Successful analyses | 12 | — |
+| Failed analyses | 0 | — |
+| Total runtime | 07:09:36 | ~00:35:48 |
+| LLM calls | 558 | ~46.5 |
+| Tool calls | 192 | 16 |
+| Input tokens | 3,623,692 | ~301,974 |
+| Output tokens | 1,327,250 | ~110,604 |
+| Total LLM tokens | 4,950,942 | ~412,579 |
+
+Additional detail: Bull initial calls 12, Bear initial calls 12, Bull review
+calls 24, Bear review calls 24, Research Verifier passes 13, repair rounds 1.
+
+> **Twelve Medium-depth analyses generated almost 5 million LLM tokens.**
+
+> [!WARNING]
+> If the model is consumed through a paid API instead of a local backend,
+> even a batch that looks small (12 tickers here) can generate a significant
+> bill. Estimate the expected token volume and the provider/model's price per
+> token **before** running a large batch, not after.
+
+#### Hardware
+
+Benchmarks in this section were run on:
+
+- CPU: AMD Ryzen 5 7600X
+- System RAM: 128 GB @ 3800 MT/s
+- GPU: NVIDIA GeForce RTX 5060 Ti
+- VRAM: 16 GB
+- Inference backend: Ollama
+- Context length: 131072
+
+Runtime figures depend strongly on this hardware, the model's quantization,
+the inference backend, and how a model's layers split between GPU VRAM and
+system RAM/CPU. A different machine, backend, or quantization can change
+wall-clock time substantially even for the same model and workload.
+
+During the Gemma 4 26B batch above, Ollama reported **28% CPU / 72% GPU** at
+the end of the run. This is not a CPU/GPU utilization percentage — it reflects
+the CPU/GPU split Ollama used to host that specific model on this specific
+machine/configuration. Other models can have a very different split and
+performance profile.
+
+#### Qwen 125B comparison
+
+`qwen3.8-flash-next:125b-a6b-q4_K_M` is the local model currently preferred
+for quality validation. The single-run figures below are the same NVDA run
+already listed in the model-comparison table above — repeated here as the
+basis for a 12-ticker extrapolation:
+
+- Ticker: NVDA only (**a single run, not a 12-ticker batch**)
+- Analysis date: 2026-09-30
+- Research depth: Medium / Language: Spanish
+- Analysts: Market, Social/Sentiment, News, Fundamentals
+- Runtime: 03:11:00
+- LLM calls: 32 / Tool calls: 24
+- Input tokens: 460,610 / Output tokens: 135,193 / Total tokens: 595,803
+
+Linear ×12 extrapolation — **illustrative extrapolation, not a measured
+12-ticker batch**:
+
+| Metric | Illustrative 12-ticker extrapolation |
+|---|---:|
+| Runtime | ~38 h 12 min |
+| LLM calls | ~384 |
+| Tool calls | ~288 |
+| Input tokens | ~5.53 M |
+| Output tokens | ~1.62 M |
+| Total tokens | ~7.15 M |
+
+A real 12-ticker batch would not necessarily match this exactly:
+
+- different symbols can trigger a different number of tool calls;
+- the number of structured-output fallbacks can vary;
+- some tickers may need additional repair rounds;
+- token counts can vary with how much evidence each ticker's reports contain;
+- runtime depends heavily on hardware and the CPU/GPU split.
+
+This comparison shows order of magnitude, not a prediction of how long a real
+batch will take.
+
+#### Why this uses so many tokens
+
+A `Medium` run can include: (1) analyst reports, (2) Bull and Bear initial
+theses, (3) two Bull/Bear cross-review rounds, (4) research verification,
+(5) optional repair and re-verification, (6) Research Manager, (7) Trader,
+(8) three independent Risk assessments, (9) three Risk cross-reviews,
+(10) Portfolio Manager, and (11) additional fallback / canonical-recovery
+calls when structured output fails.
+
+This buys auditability, adversarial review, thesis contrast, error detection,
+and provenance/canonical-state control — at a real cost in calls, context, and
+tokens.
+
+#### Current model roles
+
+- **Final / high-quality local validation:** `qwen3.8-flash-next:125b-a6b-q4_K_M`
+- **Development / stress testing:** `gemma4:26b`
+- **Very fast smoke testing:** `gpt-oss:20b`
+
+`gemma4:26b` is used during development because it is considerably faster and
+reliably produces enough structured-output fallbacks to exercise the fallback
+and canonical-recovery paths — it is **not** the preferred model for
+maximum-quality analysis. These role assignments are local observations for
+this project and hardware, not general claims about the absolute quality of
+these models.
 
 ## Planned experiments
 

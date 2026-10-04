@@ -24,7 +24,7 @@ from cli.run import (
 from cli.stats_handler import StatsCallbackHandler
 from tradingagents.agents.rating import RATINGS_5_TIER, extract_choice, is_review
 from tradingagents.dataflows.symbols import safe_ticker_component
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import DEFAULT_CONFIG, resolve_effective_models
 from tradingagents.graph.conditional_logic import RISK_ANALYSIS_TOTAL_TURNS
 from tradingagents.graph.trading_graph import _validate_trade_date
 
@@ -89,13 +89,23 @@ def parse_tickers(value: str | None, tickers_file: Path | None = None) -> list[s
     return tickers
 
 
-def build_headless_config(depth_value: int, language: str, results_dir: Path) -> dict:
+def build_headless_config(
+    depth_value: int,
+    language: str,
+    results_dir: Path,
+    *,
+    cli_deep_think_llm: str | None = None,
+    cli_quick_think_llm: str | None = None,
+) -> dict:
     if not language.strip():
         raise ValueError("language must not be empty")
+    effective_deep, effective_quick = resolve_effective_models(
+        DEFAULT_CONFIG, cli_deep_think_llm, cli_quick_think_llm
+    )
     selections = {
         "research_depth": depth_value,
-        "quick_think_llm": DEFAULT_CONFIG["quick_think_llm"],
-        "deep_think_llm": DEFAULT_CONFIG["deep_think_llm"],
+        "quick_think_llm": effective_quick,
+        "deep_think_llm": effective_deep,
         "backend_url": DEFAULT_CONFIG["backend_url"],
         "llm_provider": DEFAULT_CONFIG["llm_provider"],
         "google_thinking_level": DEFAULT_CONFIG.get("google_thinking_level"),
@@ -350,6 +360,9 @@ def run_single_analysis(
     report_root: Path | None = None,
     progress: Callable[[str], None] | None = None,
     progress_prefix: str | None = None,
+    deep_think_llm: str | None = None,
+    quick_think_llm: str | None = None,
+    trace_llm: bool = False,
 ) -> dict[str, Any]:
     ticker = normalize_ticker_symbol(ticker)
     safe_ticker_component(ticker)
@@ -357,7 +370,15 @@ def run_single_analysis(
     selected_analysts, asset_type = _analysts_for_ticker(analysts, ticker)
     output_dir = output_dir.resolve()
     root = (report_root or output_dir).resolve()
-    config = build_headless_config(depth_value, language, root)
+    config = build_headless_config(
+        depth_value, language, root,
+        cli_deep_think_llm=deep_think_llm, cli_quick_think_llm=quick_think_llm,
+    )
+    if progress is not None:
+        progress(
+            f"{progress_prefix or ticker} - Deep model: {config['deep_think_llm']}; "
+            f"Quick model: {config['quick_think_llm']}"
+        )
     stats_handler = StatsCallbackHandler()
     started = time.monotonic()
     on_chunk = (
@@ -390,6 +411,7 @@ def run_single_analysis(
             output_dir=output_dir,
             stats_handler=stats_handler,
             on_chunk=on_chunk,
+            trace_llm=trace_llm,
         )
     except PartialExecutionError as exc:
         report_path = (
@@ -584,6 +606,9 @@ def run_batch_analysis(
     language: str,
     output_dir: Path,
     progress: Callable[[str], None],
+    deep_think_llm: str | None = None,
+    quick_think_llm: str | None = None,
+    trace_llm: bool = False,
 ) -> tuple[list[dict], Path, Path]:
     analysis_date = _validate_trade_date(analysis_date)
     output_dir = output_dir.resolve()
@@ -614,6 +639,9 @@ def run_batch_analysis(
                 report_root=output_dir,
                 progress=progress,
                 progress_prefix=f"[{index}/{len(tickers)}] {ticker}",
+                deep_think_llm=deep_think_llm,
+                quick_think_llm=quick_think_llm,
+                trace_llm=trace_llm,
             )
         except Exception as exc:
             # A setup-time failure that never reached graph execution (e.g. a

@@ -11,12 +11,17 @@ from tradingagents.agents.context import (
     report_or_absent,
 )
 from tradingagents.agents.fallback_log import warn_fallback
+from tradingagents.agents.researchers.canonical_recovery import (
+    downstream_safe_text,
+    latest_side_recovery_status,
+)
 from tradingagents.agents.researchers.trade_metrics import (
     render_trade_metrics,
     trade_metrics_from_dict,
 )
 from tradingagents.agents.schemas import ResearchVerification, VerificationStatus
 from tradingagents.agents.structured import NO_EXTERNAL_TOOLS, bind_structured
+from tradingagents.llm_trace import record_structured_parse_result, traced_invoke
 from tradingagents.prompts.loader import render_agent_prompt
 
 from .verification import normalize_verification
@@ -57,15 +62,32 @@ def create_research_verifier(llm):
 
     def verifier_node(state) -> dict:
         debate = state["investment_debate_state"]
+        # A fallback whose canonical recovery failed (UNAPPLIED) must not be
+        # read here as live narrative evidence -- only its bare status is
+        # shown, never the failed fallback's own semantic content. The full
+        # text is still preserved verbatim in bull_history/bear_history for
+        # report/audit/debug; this only affects what this prompt sees.
         bull_position = (
             debate.get("bull_repair")
-            or debate.get("current_bull_response")
-            or debate.get("bull_initial", "")
+            or downstream_safe_text(
+                debate.get("current_bull_response", ""),
+                latest_side_recovery_status(debate, "bull"),
+            )
+            or downstream_safe_text(
+                debate.get("bull_initial", ""),
+                debate.get("bull_initial_recovery_status", "NOT_RUN"),
+            )
         )
         bear_position = (
             debate.get("bear_repair")
-            or debate.get("current_bear_response")
-            or debate.get("bear_initial", "")
+            or downstream_safe_text(
+                debate.get("current_bear_response", ""),
+                latest_side_recovery_status(debate, "bear"),
+            )
+            or downstream_safe_text(
+                debate.get("bear_initial", ""),
+                debate.get("bear_initial_recovery_status", "NOT_RUN"),
+            )
         )
         prompt = (
             render_agent_prompt(
@@ -95,10 +117,15 @@ def create_research_verifier(llm):
         result = None
         if structured_llm is not None:
             try:
-                result = structured_llm.invoke(prompt)
+                result = traced_invoke(structured_llm, prompt, attempt="structured")
                 if result is None:
                     raise ValueError("structured output returned no parsed result")
+                record_structured_parse_result(
+                    success=True,
+                    parsed=result.model_dump(mode="json") if hasattr(result, "model_dump") else None,
+                )
             except Exception as exc:
+                record_structured_parse_result(success=False, error=str(exc))
                 warn_fallback(
                     logger,
                     "Research Verifier: structured output unavailable; "
@@ -106,7 +133,9 @@ def create_research_verifier(llm):
                     detail=_brief_error(exc),
                 )
         if result is None:
-            result = _parse_freetext_result(llm.invoke(prompt).content)
+            result = _parse_freetext_result(
+                traced_invoke(llm, prompt, attempt="verifier_json_fallback").content
+            )
 
         result = normalize_verification(
             result

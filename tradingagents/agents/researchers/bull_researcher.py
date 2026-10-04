@@ -66,7 +66,7 @@ def create_bull_researcher(llm):
             )
             prompt += get_language_instruction()
 
-            rendered, thesis_dict = invoke_initial_thesis(
+            rendered, thesis_dict, initial_recovery_status = invoke_initial_thesis(
                 structured_initial_llm, llm, prompt, "Bull Researcher"
             )
             argument = f"Bull Analyst (Initial): {rendered}"
@@ -79,6 +79,7 @@ def create_bull_researcher(llm):
                     "count": investment_debate_state.get("count", 0) + 1,
                     "bull_initial": argument,
                     "current_bull_response": argument,
+                    "bull_initial_recovery_status": initial_recovery_status,
                 }
             )
             if thesis_dict is not None:
@@ -122,8 +123,12 @@ def create_bull_researcher(llm):
             )
             prompt += get_language_instruction()
 
-            rendered, review_dict = invoke_review(
-                structured_review_llm, llm, prompt, "Bull Researcher"
+            rendered, review_dict, review_recovery_status = invoke_review(
+                structured_review_llm,
+                llm,
+                prompt,
+                "Bull Researcher",
+                prior_thesis=investment_debate_state.get("bull_thesis"),
             )
             argument = f"Bull Analyst (Review {review_round}): {rendered}"
 
@@ -136,6 +141,7 @@ def create_bull_researcher(llm):
                     "pending_bull_rebuttal": argument,
                     "bull_rebuttal_count": investment_debate_state.get("bull_rebuttal_count", 0)
                     + 1,
+                    "bull_review_recovery_status": review_recovery_status,
                 }
             )
             if review_dict is not None:

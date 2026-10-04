@@ -595,6 +595,56 @@ def render_review_outcome(outcome: ResearchReviewOutcome) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Canonical recovery -- minimal patch contracts for a Research textual
+# fallback (see ``researchers/canonical_recovery.py``).
+#
+# Deliberately much smaller than InitialResearchThesis/ResearchReviewOutcome:
+# these only carry the fields the rest of the system treats as canonical
+# state (bull_thesis/bear_thesis, conviction, trade-plan levels). Narrative
+# fields (thesis prose, evidence, risks, data_gaps, accepted/rejected lists,
+# conviction_reason, ...) are not reconstructed -- they stay in the free-text
+# fallback for audit, never promoted to canonical state.
+# ---------------------------------------------------------------------------
+
+
+class InitialThesisCanonicalPatch(BaseModel):
+    """Minimal recovery contract for an INITIAL thesis fallback: just enough
+    to create a valid canonical ``bull_thesis``/``bear_thesis`` entry.
+
+    ``suggested_risk_unit`` is optional and deliberately NOT derived from
+    ``conviction_total`` the way the normal structured path derives it (see
+    ``suggested_risk_unit_for``): a fallback researcher is explicitly told
+    not to choose this field itself (see the bull/bear initial prompts), so
+    it is normally simply absent from the text, and "high conviction" must
+    never be read as "HIGH research risk unit". ``canonical_recovery.py``
+    only accepts this value when the fallback text itself explicitly labels
+    it (e.g. "Suggested Risk Unit: MEDIUM"); otherwise the canonical value is
+    "not recorded", regardless of what this field says.
+    """
+
+    direction: ResearchDirection
+    conviction_total: int = Field(ge=0, le=100)
+    entry: EntryLevel
+    take_profit: float | None = None
+    stop_loss: float | None = None
+    suggested_risk_unit: SuggestedRiskUnit | None = Field(default=None)
+
+    @field_validator("take_profit", "stop_loss", mode="before")
+    @classmethod
+    def _nullish_float_to_none(cls, v):
+        return _coerce_optional_float(v)
+
+
+class ReviewCanonicalPatch(BaseModel):
+    """Minimal recovery contract for a REVIEW fallback: a patch over the
+    prior canonical thesis (KEEP/REVISE/WITHDRAW + the new conviction), not a
+    reconstruction of the whole thesis."""
+
+    conviction_after: int = Field(ge=0, le=100)
+    trade_plan_changes: TradePlanChanges = Field(default_factory=TradePlanChanges)
+
+
+# ---------------------------------------------------------------------------
 # Research Manager
 # ---------------------------------------------------------------------------
 
