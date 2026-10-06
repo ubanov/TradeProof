@@ -145,7 +145,15 @@ def test_decision_agents_see_the_portfolio(module, factory, monkeypatch):
                               "current_aggressive_response": "", "current_conservative_response": "",
                               "current_neutral_response": "", "judge_decision": ""},
     }
-    node = getattr(mod, factory)(_LLM())
+    import inspect
+
+    fn = getattr(mod, factory)
+    llm = _LLM()
+    # Trader/Portfolio Manager take one LLM; the Risk debators split
+    # generation (initial)/review (cross-review) and take two -- the same
+    # fake serves both roles here since this test only checks the prompt
+    # content, not routing.
+    node = fn(llm, llm) if len(inspect.signature(fn).parameters) == 2 else fn(llm)
     node(state)
     assert any("PORTFOLIO_BLOCK_MARKER" in p for p in seen), f"{factory} prompt lacks the portfolio block"
 

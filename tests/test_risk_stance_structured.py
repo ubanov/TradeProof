@@ -55,7 +55,7 @@ def _apply(state, node):
 def test_aggressive_initial_turn_sets_risk_level_disposition_and_marker():
     state = _state()
     llm = _StructuredLLM([_assessment(risk_level="LOW", disposition="DEFER")])
-    _apply(state, create_aggressive_debator(llm))
+    _apply(state, create_aggressive_debator(llm, llm))
 
     debate = state["risk_debate_state"]
     assert debate["aggressive_risk_level"] == "LOW"
@@ -68,11 +68,13 @@ def test_aggressive_initial_turn_sets_risk_level_disposition_and_marker():
 @pytest.mark.unit
 def test_conservative_and_neutral_each_track_their_own_risk_level():
     state = _state()
-    _apply(state, create_conservative_debator(_StructuredLLM([_assessment(risk_level="HIGH")])))
+    con_llm = _StructuredLLM([_assessment(risk_level="HIGH")])
+    _apply(state, create_conservative_debator(con_llm, con_llm))
     assert state["risk_debate_state"]["conservative_risk_level"] == "HIGH"
     assert state["risk_debate_state"]["aggressive_risk_level"] == ""
 
-    _apply(state, create_neutral_debator(_StructuredLLM([_assessment(risk_level="MEDIUM")])))
+    neu_llm = _StructuredLLM([_assessment(risk_level="MEDIUM")])
+    _apply(state, create_neutral_debator(neu_llm, neu_llm))
     assert state["risk_debate_state"]["neutral_risk_level"] == "MEDIUM"
     # Earlier speakers' levels survive an unrelated turn.
     assert state["risk_debate_state"]["conservative_risk_level"] == "HIGH"
@@ -87,7 +89,7 @@ def test_second_turn_is_the_cross_review_not_another_independent_assessment():
             _assessment(risk_level="MEDIUM", disposition="REDUCE_RISK"),
         ]
     )
-    aggressive = create_aggressive_debator(llm)
+    aggressive = create_aggressive_debator(llm, llm)
     _apply(state, aggressive)
     first_initial = state["risk_debate_state"]["aggressive_initial"]
 
@@ -111,7 +113,7 @@ def test_cross_review_updates_only_review_fields_not_the_initial_record():
             _assessment(risk_level="HIGH", disposition="REJECT_PLAN", rationale="review take"),
         ]
     )
-    aggressive = create_aggressive_debator(llm)
+    aggressive = create_aggressive_debator(llm, llm)
     _apply(state, aggressive)
     initial_text = state["risk_debate_state"]["aggressive_initial"]
     initial_assessment = state["risk_debate_state"]["aggressive_initial_assessment"]
@@ -136,7 +138,7 @@ def test_unsupported_claims_seen_during_cross_review_are_recorded():
             ),
         ]
     )
-    aggressive = create_aggressive_debator(llm)
+    aggressive = create_aggressive_debator(llm, llm)
     _apply(state, aggressive)
     _apply(state, aggressive)
     review = state["risk_debate_state"]["aggressive_review_assessment"]
@@ -154,7 +156,8 @@ def test_falls_back_to_freetext_when_structured_output_unsupported():
             return SimpleNamespace(content="plain prose assessment")
 
     state = _state()
-    _apply(state, create_aggressive_debator(_PlainLLM()))
+    llm = _PlainLLM()
+    _apply(state, create_aggressive_debator(llm, llm))
     debate = state["risk_debate_state"]
     assert "plain prose assessment" in debate["aggressive_initial"]
     assert debate["aggressive_risk_level"] == ""  # no signal available, not invented

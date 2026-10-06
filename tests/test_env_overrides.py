@@ -136,6 +136,17 @@ def test_invalid_bool_raises(monkeypatch, bad):
     importlib.reload(default_config_module)
 
 
+def test_seed_env_override(monkeypatch):
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_SEED="184736291")
+    assert dc.DEFAULT_CONFIG["seed"] == 184736291
+    assert isinstance(dc.DEFAULT_CONFIG["seed"], int)
+
+
+def test_seed_defaults_to_zero(monkeypatch):
+    dc = _reload_with_env(monkeypatch)
+    assert dc.DEFAULT_CONFIG["seed"] == 0
+
+
 def test_unknown_env_var_is_ignored(monkeypatch):
     """Env vars outside _ENV_OVERRIDES must not bleed into DEFAULT_CONFIG."""
     dc = _reload_with_env(

@@ -52,7 +52,10 @@ NON_CANONICAL_NOTE = (
 )
 
 
-def invoke_initial_thesis(structured_llm, plain_llm, prompt, agent_name: str):
+def invoke_initial_thesis(
+    structured_llm, plain_llm, prompt, agent_name: str, *,
+    call_identity: str | None = None, llm_role: str | None = None,
+):
     """Return ``(rendered_markdown, thesis_dict_or_None, recovery_status)``.
 
     ``recovery_status`` is a ``CanonicalRecoveryStatus.value`` string:
@@ -60,10 +63,20 @@ def invoke_initial_thesis(structured_llm, plain_llm, prompt, agent_name: str):
     ``APPLIED``/``UNAPPLIED`` when it fell back to free text and canonical
     recovery did/did not manage to reconstruct a minimal canonical thesis
     from that text (see ``canonical_recovery.py``).
+
+    ``call_identity`` is forwarded to ``traced_invoke`` for best-effort
+    deterministic replay (see ``tradingagents/run_seed.py``). ``llm_role``
+    ("generation"/"review", see fork README: "Model roles: Generation vs
+    Review") is forwarded the same way, including into canonical recovery on
+    a fallback -- recovery always inherits the role of the call it is
+    recovering, never a fixed one.
     """
     if structured_llm is not None:
         try:
-            result = traced_invoke(structured_llm, prompt, attempt="structured")
+            result = traced_invoke(
+                structured_llm, prompt, attempt="structured",
+                call_identity=call_identity, llm_role=llm_role,
+            )
             if result is None:
                 raise ValueError("structured output returned no parsed result")
             if not isinstance(result, InitialResearchThesis):
@@ -82,8 +95,12 @@ def invoke_initial_thesis(structured_llm, plain_llm, prompt, agent_name: str):
                 "continuing with free-text fallback.",
                 detail=str(exc),
             )
-    fallback_text = traced_invoke(plain_llm, prompt, attempt="fallback").content
-    thesis_dict, status = recover_initial_thesis(fallback_text, plain_llm, agent_name)
+    fallback_text = traced_invoke(
+        plain_llm, prompt, attempt="fallback", call_identity=call_identity, llm_role=llm_role,
+    ).content
+    thesis_dict, status = recover_initial_thesis(
+        fallback_text, plain_llm, agent_name, llm_role=llm_role
+    )
     if status is CanonicalRecoveryStatus.UNAPPLIED:
         warn_fallback(
             logger,
@@ -95,18 +112,29 @@ def invoke_initial_thesis(structured_llm, plain_llm, prompt, agent_name: str):
 
 
 def invoke_review(
-    structured_llm, plain_llm, prompt, agent_name: str, prior_thesis: dict | None = None
+    structured_llm,
+    plain_llm,
+    prompt,
+    agent_name: str,
+    prior_thesis: dict | None = None,
+    *,
+    call_identity: str | None = None,
+    llm_role: str | None = None,
 ):
     """Return ``(rendered_markdown, review_dict_or_None, recovery_status)``.
 
     ``prior_thesis`` is the side's current canonical thesis dict (if any),
     passed through to canonical recovery so a fallback review can be
     represented as a patch over it -- never reconstructed from scratch. See
-    ``invoke_initial_thesis`` for ``recovery_status``'s meaning.
+    ``invoke_initial_thesis`` for ``recovery_status``'s, ``call_identity``'s,
+    and ``llm_role``'s meaning.
     """
     if structured_llm is not None:
         try:
-            result = traced_invoke(structured_llm, prompt, attempt="structured")
+            result = traced_invoke(
+                structured_llm, prompt, attempt="structured",
+                call_identity=call_identity, llm_role=llm_role,
+            )
             if result is None:
                 raise ValueError("structured output returned no parsed result")
             if not isinstance(result, ResearchReviewOutcome):
@@ -125,8 +153,12 @@ def invoke_review(
                 "with free-text fallback.",
                 detail=str(exc),
             )
-    fallback_text = traced_invoke(plain_llm, prompt, attempt="fallback").content
-    review_dict, status = recover_review_patch(fallback_text, prior_thesis, plain_llm, agent_name)
+    fallback_text = traced_invoke(
+        plain_llm, prompt, attempt="fallback", call_identity=call_identity, llm_role=llm_role,
+    ).content
+    review_dict, status = recover_review_patch(
+        fallback_text, prior_thesis, plain_llm, agent_name, llm_role=llm_role
+    )
     if status is CanonicalRecoveryStatus.UNAPPLIED:
         warn_fallback(
             logger,
@@ -252,4 +284,6 @@ def recompute_trade_metrics(thesis: dict, atr: float | None) -> dict:
         "reward_risk": metrics.reward_risk,
         "stop_atr": metrics.stop_atr,
         "target_atr": metrics.target_atr,
+        "risk_reward_min": metrics.risk_reward_min,
+        "risk_reward_max": metrics.risk_reward_max,
     }

@@ -90,7 +90,7 @@ def _apply(state, node):
 def test_initial_thesis_populates_structured_fields_and_deterministic_metrics():
     state = _state()
     bull_llm = _StructuredLLM([_thesis(ResearchDirection.BULL)])
-    _apply(state, create_bull_researcher(bull_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
 
     debate = state["investment_debate_state"]
     assert debate["bull_thesis"]["direction"] == "BULL"
@@ -115,10 +115,10 @@ def test_bull_and_bear_initial_theses_are_independent_even_when_structured():
     bull_llm = _StructuredLLM([_thesis(ResearchDirection.BULL)])
     bear_llm = _StructuredLLM([_thesis(ResearchDirection.BEAR, total=40)])
 
-    _apply(state, create_bull_researcher(bull_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
     assert "BEAR" not in bull_llm.prompts[0]
 
-    _apply(state, create_bear_researcher(bear_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
     assert "BULL" not in bear_llm.prompts[0]
 
     debate = state["investment_debate_state"]
@@ -133,8 +133,8 @@ def test_both_sides_receive_the_identical_shared_setup_tags_and_horizon():
     state = _state()
     bull_llm = _StructuredLLM([_thesis(ResearchDirection.BULL)])
     bear_llm = _StructuredLLM([_thesis(ResearchDirection.BEAR)])
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
 
     for prompt in (bull_llm.prompts[0], bear_llm.prompts[0]):
         assert "RSI_BUCKET: RSI_50_65" in prompt
@@ -163,8 +163,8 @@ def test_review_can_revise_stop_loss_and_recompute_deterministic_metrics():
         [_thesis(ResearchDirection.BULL), _review(75, 68, sl_action="REVISE", sl_new=76860)]
     )
     bear_llm = _StructuredLLM([_thesis(ResearchDirection.BEAR)])
-    bull = create_bull_researcher(bull_llm)
-    bear = create_bear_researcher(bear_llm)
+    bull = create_bull_researcher(bull_llm, bull_llm)
+    bear = create_bear_researcher(bear_llm, bear_llm)
 
     _apply(state, bull)
     _apply(state, bear)
@@ -184,9 +184,9 @@ def test_review_can_withdraw_take_profit():
         [_thesis(ResearchDirection.BULL), _review(75, 75, tp_action="WITHDRAW")]
     )
     bear_llm = _StructuredLLM([_thesis(ResearchDirection.BEAR)])
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
-    _apply(state, create_bull_researcher(bull_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
 
     debate = state["investment_debate_state"]
     assert debate["bull_thesis"]["take_profit"] is None
@@ -200,9 +200,9 @@ def test_withdrawn_trade_plan_level_is_recorded_in_debate_state():
         [_thesis(ResearchDirection.BULL), _review(75, 75, tp_action="WITHDRAW")]
     )
     bear_llm = _StructuredLLM([_thesis(ResearchDirection.BEAR)])
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
-    _apply(state, create_bull_researcher(bull_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
 
     assert state["investment_debate_state"]["withdrawn_values"] == [87360]
 
@@ -212,9 +212,9 @@ def test_review_can_keep_all_trade_plan_fields_unchanged():
     state = _state()
     bull_llm = _StructuredLLM([_thesis(ResearchDirection.BULL), _review(75, 75)])
     bear_llm = _StructuredLLM([_thesis(ResearchDirection.BEAR)])
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
-    _apply(state, create_bull_researcher(bull_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
 
     debate = state["investment_debate_state"]
     assert debate["bull_thesis"]["stop_loss"] == 80920
@@ -238,9 +238,9 @@ def test_new_data_exception_is_recorded_and_tagged_by_side_and_round():
     )
     bull_llm = _StructuredLLM([_thesis(ResearchDirection.BULL, total=70), review_with_exception])
     bear_llm = _StructuredLLM([_thesis(ResearchDirection.BEAR)])
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
-    _apply(state, create_bull_researcher(bull_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
 
     exceptions = state["investment_debate_state"]["new_data_exceptions"]
     assert len(exceptions) == 1
@@ -258,10 +258,10 @@ def test_review_outcome_lines_still_feed_the_existing_review_outcomes_extractor(
     bear_llm = _StructuredLLM(
         [_thesis(ResearchDirection.BEAR), _review(60, 60)]
     )
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
 
     assert "ACCEPTED: A valid correction" in state["investment_debate_state"]["review_outcomes"]
 
@@ -295,10 +295,10 @@ def test_research_manager_receives_conviction_trail_setup_tags_and_trade_metrics
     state = _state()
     bull_llm = _StructuredLLM([_thesis(ResearchDirection.BULL), _review(75, 68)])
     bear_llm = _StructuredLLM([_thesis(ResearchDirection.BEAR, total=40), _review(40, 40)])
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
 
     manager_llm = _ManagerLLM()
     create_research_manager(manager_llm)(state)
@@ -311,6 +311,9 @@ def test_research_manager_receives_conviction_trail_setup_tags_and_trade_metrics
     assert "NOT a probability of the market outcome" in prompt
     assert "not a portfolio percentage" in prompt
     assert "Entry (reference): 83100.00" in prompt
+    # _thesis() uses a genuine entry range: the Research Manager must receive
+    # the deterministic range metrics too, not just the reference entry's R/R.
+    assert "R/R across entry range" in prompt
 
 
 @pytest.mark.unit
@@ -332,12 +335,16 @@ def test_verifier_receives_deterministic_trade_metrics():
     state = _state()
     bull_llm = _StructuredLLM([_thesis(ResearchDirection.BULL)])
     bear_llm = _StructuredLLM([_thesis(ResearchDirection.BEAR)])
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
 
     verifier_llm = _VerifierLLM()
     _apply(state, create_research_verifier(verifier_llm))
 
     prompt = verifier_llm.prompts[0]
     assert "Entry (reference): 83100.00" in prompt
-    assert "Reward/Risk" in prompt
+    # _thesis() uses a genuine entry range (82900-83300): the verifier must
+    # see both the reference R/R and the deterministic range, never just the
+    # midpoint's ratio presented as if it were "the plan's R/R".
+    assert "Reference R/R (at reference entry)" in prompt
+    assert "R/R across entry range" in prompt

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from types import SimpleNamespace
 
@@ -173,6 +174,7 @@ def test_result_document_includes_research_agent_execution_counts(tmp_path):
         duration_seconds=12.5,
         stats={"llm_calls": 10, "tool_calls": 3, "tokens_in": 100, "tokens_out": 20},
         fallback_warnings=0,
+        base_seed=None,
     )
 
     result = result_document(execution, tmp_path)
@@ -214,6 +216,7 @@ def test_result_document_parses_unlabelled_standalone_ratings_and_actions(tmp_pa
         duration_seconds=1.0,
         stats={"llm_calls": 1, "tool_calls": 0, "tokens_in": 1, "tokens_out": 1},
         fallback_warnings=0,
+        base_seed=None,
     )
 
     result = result_document(execution, tmp_path)
@@ -328,3 +331,80 @@ def test_batch_prints_aggregate_execution_summary(monkeypatch, tmp_path):
     assert "tokens 1000 in/200 out" in result.output
     assert "Bull reviews 2" in result.output
     assert "Verifier 1" in result.output
+
+
+# --- best-effort deterministic replay: base_seed recorded in artifacts -----
+
+
+@pytest.mark.unit
+def test_write_batch_summary_records_the_base_seed(tmp_path):
+    from cli.headless import write_batch_summary
+
+    results = [{
+        "ticker": "NVDA", "status": "ok", "rating": "Buy", "action": "Buy",
+        "entry_price": 100, "stop_loss": 90, "report_path": "NVDA/complete_report.md",
+    }]
+    markdown_path, json_path = write_batch_summary(
+        tmp_path, analysis_date="2026-09-30", depth="medium", analysts=["market"],
+        language="English", results=results, base_seed=184736291,
+    )
+    assert "Run seed: 184736291" in markdown_path.read_text(encoding="utf-8")
+    summary = json.loads(json_path.read_text(encoding="utf-8"))
+    assert summary["base_seed"] == 184736291
+
+
+@pytest.mark.unit
+def test_write_batch_summary_omits_run_seed_line_when_not_seeded(tmp_path):
+    from cli.headless import write_batch_summary
+
+    markdown_path, json_path = write_batch_summary(
+        tmp_path, analysis_date="2026-09-30", depth="medium", analysts=["market"],
+        language="English", results=[], base_seed=None,
+    )
+    assert "Run seed:" not in markdown_path.read_text(encoding="utf-8")
+    assert json.loads(json_path.read_text(encoding="utf-8"))["base_seed"] is None
+
+
+@pytest.mark.unit
+def test_result_document_records_the_base_seed(tmp_path):
+    execution = SimpleNamespace(
+        final_state={
+            "investment_debate_state": {}, "investment_plan": "",
+            "trader_investment_plan": "", "final_trade_decision": "",
+        },
+        ticker="NVDA", analysis_date="2026-09-30", rating="REVIEW", report_path=None,
+        duration_seconds=1.0,
+        stats={"llm_calls": 1, "tool_calls": 0, "tokens_in": 1, "tokens_out": 1},
+        fallback_warnings=0, base_seed=184736291,
+    )
+    assert result_document(execution, tmp_path)["base_seed"] == 184736291
+
+
+@pytest.mark.unit
+def test_run_batch_analysis_reuses_the_same_base_seed_for_every_ticker_never_regenerating(monkeypatch, tmp_path):
+    """One base seed for the whole batch -- never a fresh one generated per
+    ticker. (resolve_base_seed itself is the caller's job, before this
+    function runs; this only verifies the SAME value threads through to
+    every ticker's own run_single_analysis call, unmodified.)"""
+    seen_base_seeds = []
+
+    def fake_run_single_analysis(*, ticker, base_seed, **kwargs):
+        seen_base_seeds.append(base_seed)
+        return {
+            "ticker": ticker,
+            "stats": {"llm_calls": 1, "tool_calls": 0, "tokens_in": 1, "tokens_out": 1},
+            "research_execution": {
+                "verification_status": "PASS", "verifier_passes": 1, "repair_rounds": 0,
+            },
+            "run_duration_seconds": 1.0,
+            "status": "ok",
+        }
+
+    monkeypatch.setattr(cli_headless, "run_single_analysis", fake_run_single_analysis)
+    run_batch_analysis(
+        tickers=["NVDA", "AMD", "MSFT"],
+        analysis_date="2026-09-29", analysts=["market"], depth_name="medium",
+        depth_value=2, language="English", output_dir=tmp_path,
+        progress=lambda line: None, base_seed=184736291,
+    )
+    assert seen_base_seeds == [184736291, 184736291, 184736291]

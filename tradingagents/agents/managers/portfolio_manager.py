@@ -34,8 +34,11 @@ from tradingagents.agents.structured import (
 from tradingagents.prompts.loader import render_agent_prompt
 
 
-def create_portfolio_manager(llm):
-    structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+def create_portfolio_manager(generation_llm):
+    """The critical review already happened in Risk's cross-review; Portfolio
+    Manager synthesizes and decides -- a generation operation (see fork
+    README: "Model roles: Generation vs Review")."""
+    structured_llm = bind_structured(generation_llm, PortfolioDecision, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
@@ -79,10 +82,12 @@ def create_portfolio_manager(llm):
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,
-            llm,
+            generation_llm,
             prompt,
             render_pm_decision,
             "Portfolio Manager",
+            call_identity="portfolio_manager",
+            llm_role="generation",
         )
 
         # Real structured state, not inferred from `rating`: on a successful

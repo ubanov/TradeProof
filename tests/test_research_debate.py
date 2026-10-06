@@ -82,8 +82,8 @@ def _apply(state, node):
 
 
 def _run_initial_phase(state, bull_llm, bear_llm):
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
 
 
 @pytest.mark.unit
@@ -92,14 +92,14 @@ def test_initial_contexts_are_independent_and_receive_all_reports():
     bull_llm = _ResearchLLM("BULL_SECRET")
     bear_llm = _ResearchLLM("BEAR_SECRET")
 
-    _apply(state, create_bull_researcher(bull_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
     assert "BEAR_SECRET" not in bull_llm.prompts[0]
 
     # Bull's output is now in graph state, but Bear's initial prompt builder does
     # not pass any Bull field to the LLM. Independence is enforced by context
     # construction rather than an instruction to ignore visible text.
     assert "BULL_SECRET_1" in str(state["investment_debate_state"])
-    _apply(state, create_bear_researcher(bear_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
     assert "BULL_SECRET_1" not in bear_llm.prompts[0]
 
     for prompt in (bull_llm.prompts[0], bear_llm.prompts[0]):
@@ -118,8 +118,8 @@ def test_reviews_use_only_the_previous_completed_phase_or_round():
     state = _state()
     bull_llm = _ResearchLLM("BULL")
     bear_llm = _ResearchLLM("BEAR")
-    bull = create_bull_researcher(bull_llm)
-    bear = create_bear_researcher(bear_llm)
+    bull = create_bull_researcher(bull_llm, bull_llm)
+    bear = create_bear_researcher(bear_llm, bear_llm)
     _run_initial_phase(state, bull_llm, bear_llm)
 
     _apply(state, bull)
@@ -148,8 +148,8 @@ def test_bull_and_bear_review_prompts_are_collaborative_but_distinct():
     state = _state()
     bull_llm = _ResearchLLM("BULL")
     bear_llm = _ResearchLLM("BEAR")
-    bull = create_bull_researcher(bull_llm)
-    bear = create_bear_researcher(bear_llm)
+    bull = create_bull_researcher(bull_llm, bull_llm)
+    bear = create_bear_researcher(bear_llm, bear_llm)
     _run_initial_phase(state, bull_llm, bear_llm)
 
     _apply(state, bull)
@@ -182,8 +182,8 @@ def test_research_manager_receives_initial_theses_and_rebuttal_history():
     bull_llm = _ResearchLLM("BULL")
     bear_llm = _ResearchLLM("BEAR")
     _run_initial_phase(state, bull_llm, bear_llm)
-    _apply(state, create_bull_researcher(bull_llm))
-    _apply(state, create_bear_researcher(bear_llm))
+    _apply(state, create_bull_researcher(bull_llm, bull_llm))
+    _apply(state, create_bear_researcher(bear_llm, bear_llm))
 
     manager_llm = _ManagerLLM()
     create_research_manager(manager_llm)(state)
@@ -203,8 +203,8 @@ def test_accepted_correction_persists_in_later_reviews_and_manager_context():
     state = _state()
     bull_llm = _ResearchLLM("BULL", ["bull initial", correction, "bull final"])
     bear_llm = _ResearchLLM("BEAR", ["bear initial", correction, "bear final"])
-    bull = create_bull_researcher(bull_llm)
-    bear = create_bear_researcher(bear_llm)
+    bull = create_bull_researcher(bull_llm, bull_llm)
+    bear = create_bear_researcher(bear_llm, bear_llm)
     _run_initial_phase(state, bull_llm, bear_llm)
 
     _apply(state, bull)
@@ -239,8 +239,8 @@ def test_configured_value_is_the_number_of_cross_review_rounds(rounds):
     bull_llm = _ResearchLLM("BULL")
     bear_llm = _ResearchLLM("BEAR")
     nodes = {
-        "Bull Researcher": create_bull_researcher(bull_llm),
-        "Bear Researcher": create_bear_researcher(bear_llm),
+        "Bull Researcher": create_bull_researcher(bull_llm, bull_llm),
+        "Bear Researcher": create_bear_researcher(bear_llm, bear_llm),
     }
     logic = ConditionalLogic(max_debate_rounds=rounds)
     target = "Bull Researcher"

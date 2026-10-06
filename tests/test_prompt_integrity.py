@@ -80,7 +80,8 @@ def test_a_report_that_was_never_produced_says_so(module, factory):
                               "current_aggressive_response": "", "current_conservative_response": "",
                               "current_neutral_response": "", "judge_decision": ""},
     }
-    getattr(mod, factory)(_LLM())(state)
+    llm = _LLM()
+    getattr(mod, factory)(llm, llm)(state)
 
     prompt = " ".join(seen)
     assert "not part of this run" in prompt or "not available" in prompt, prompt[:400]

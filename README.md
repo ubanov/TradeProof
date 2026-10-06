@@ -1,17 +1,76 @@
-# Experimental TradingAgents Fork
+# TradeProof
 
-> [!IMPORTANT]
-> This repository is an experimental fork of
-> [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents),
-> based on upstream **TradingAgents v0.5.1**.
->
-> Fork repository:
-> [https://github.com/ubanov/TradingAgents](https://github.com/ubanov/TradingAgents)
->
-> The original project and its authors remain the source of the underlying
-> TradingAgents framework. This fork adds a set of experimental changes focused
-> on prompt transparency, evidence integrity, debate structure, verification,
-> unattended execution, and future evaluation of agent recommendations.
+TradeProof is a heavily modified personal fork of
+[TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)
+focused on structured multi-agent investment research, adversarial review,
+validation, and reproducible model experimentation.
+
+It is experimental, research-oriented, multi-agent financial-analysis
+software — not an automated trading system, not a commercial product, and
+not a source of guaranteed or infallible financial recommendations. See the
+disclaimer under [TradingAgents Framework](#tradingagents-framework), which
+applies in full here.
+
+## Origin
+
+TradeProof began as a fork of
+[TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)
+(upstream **TradingAgents v0.5.1**) and still shares a meaningful part of its
+original package structure and conventions. Since that starting point it has
+diverged significantly from upstream — in model routing, research
+verification, canonical research state, risk analysis design, observability,
+and reproducibility, among other areas (see
+["How TradeProof differs from upstream"](#how-tradeproof-differs-from-upstream)
+below, and the fuller list in ["Changes in this fork"](#changes-in-this-fork)).
+
+It's published here as a personal project, in case it's useful to others
+working on similar ideas.
+
+- Upstream project: [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)
+- This fork's repository: [https://github.com/ubanov/TradingAgents](https://github.com/ubanov/TradingAgents)
+
+The original TradingAgents project and its authors ([TauricResearch](https://github.com/TauricResearch))
+remain the source of the underlying framework and research this fork builds
+on — see [Citation](#citation). This fork's own Python package, CLI command
+(`tradingagents`), and `TRADINGAGENTS_*` environment variable prefix are
+unchanged from upstream and are not renamed as part of presenting the
+project under the TradeProof name.
+
+## How TradeProof differs from upstream
+
+A short summary of the architectural areas where this fork has diverged
+most from upstream; the full, detailed list is in
+["Changes in this fork"](#changes-in-this-fork) below.
+
+- **Externalized prompts and a shared policy** — agent prompts live in text
+  files, with a shared `global_policy.txt` of evidence-integrity rules
+  applied across agents.
+- **Structured Bull/Bear theses and reviews** — independent initial theses,
+  explicit structured cross-review rounds, and classified review outcomes.
+- **Canonical research state** — structured thesis/trade-plan state tracked
+  alongside free text, with best-effort recovery when structured output
+  fails.
+- **Frozen evidence** for the Risk phase, so reviewers assess a fixed
+  snapshot rather than a moving target.
+- **Research Verifier** — an independent, deterministic-adjacent
+  quality-control pass over the completed Bull/Bear debate.
+- **Bounded research repair** — one corrective pass when the Verifier finds
+  a high-severity issue, never an open-ended loop.
+- **Deterministic manager/risk integrity checks** — LLM-free passes that
+  catch unsupported numeric claims the manager or risk discussion
+  reintroduced.
+- **Redesigned risk analysis** — independent per-reviewer assessments
+  followed by one explicit cross-review round, instead of an open debate.
+- **Deterministic trade metrics** — risk/reward and ATR-based figures
+  computed in code, not asserted by the model.
+- **LLM tracing / observability** — an opt-in, complete per-call trace
+  (`--trace-llm`) for auditing exactly what was sent and received.
+- **Best-effort deterministic replay** — a `--seed` option that derives
+  stable per-call seeds for providers that support it.
+- **Configurable reasoning effort** and **generation/review model roles** —
+  independent reasoning-effort and model configuration for the pipeline's
+  generation (produce/synthesize/decide) and review (challenge/verify/audit)
+  functions, instead of one model/effort setting for the whole pipeline.
 
 ## Changes in this fork
 
@@ -284,37 +343,119 @@
   tradingagents batch --tickers NVDA,SPY,BTC-USD
   ```
 
+### Model roles: Generation vs Review
+
+This fork routes every LLM call by **cognitive function**, not by model
+size/speed/cost. Two roles:
+
+- **Generation** — produce, extract, structure, synthesize, propose, decide:
+  evidence gathering, first-pass analysis, initial thesis generation,
+  synthesis, decision construction.
+- **Review** — challenge, verify, audit, correct, repair: adversarial review,
+  verification, repair, cross-review.
+
+A generation-role model can be enormous and slow; a review-role model can be
+small and fast — the names describe what a call *does* in the pipeline, not
+how big or fast the model behind it is. `generation_llm` and `review_llm` can
+point at the same model or two different ones; nothing in the pipeline
+depends on which.
+
+This split replaced an earlier `quick_think_llm`/`deep_think_llm` pair whose
+names described neither function nor, reliably, size/speed any more as the
+fork evolved (Research Manager and Portfolio Manager, for instance, used to
+run on the "deep" model purely as a synthesis step, not because synthesis
+needs the slower model) — see [Legacy naming](#legacy-naming) below.
+
+| Stage | Role |
+|---|---|
+| Market / Sentiment / News / Fundamentals Analyst | Generation |
+| Bull / Bear initial thesis | Generation |
+| Bull / Bear review round(s) | Review |
+| Research Verifier (structured + JSON fallback) | Review |
+| Research repair (Bull / Bear) | Review |
+| Research Manager | Generation |
+| Trader | Generation |
+| Risk: Aggressive / Conservative / Neutral independent initial assessment | Generation |
+| Risk: Aggressive / Conservative / Neutral cross-review | Review |
+| Portfolio Manager | Generation |
+
+Canonical recovery (reconstructing structured state from a free-text
+fallback) always inherits the role of the call it is recovering — a Bull
+initial-thesis fallback recovers on generation, a Bull review fallback
+recovers on review, a repair fallback recovers on review. It is never fixed
+to one role globally.
+
+Research Manager and Portfolio Manager run on generation because their job
+is to synthesize a debate/discussion that Review has already audited, not to
+audit it a second time; Research Verifier and the Risk cross-review run on
+review because auditing is exactly their job. This isn't a claim that one
+profile is universally better — our own benchmarks observed complementary
+strengths between structured generation/synthesis and adversarial
+review/auditing, which is what motivated separating the two roles instead of
+using one model knob for the whole pipeline.
+
+Example configuration (just an example — any compatible model works, and
+generation/review may be the same model):
+
+```bash
+# .env
+TRADINGAGENTS_GENERATION_LLM=deepseek-v4-pro:cloud
+TRADINGAGENTS_GENERATION_REASONING_EFFORT=high
+
+TRADINGAGENTS_REVIEW_LLM=qwen3.8-flash-next:125b-a6b-q4_K_M
+TRADINGAGENTS_REVIEW_REASONING_EFFORT=medium
+```
+
+#### Legacy naming
+
+`quick_think_llm`/`deep_think_llm` and `quick_reasoning_effort`/
+`deep_reasoning_effort` (env vars, CLI flags, and config keys) still work,
+mapped onto the canonical names:
+
+| Legacy | New |
+|---|---|
+| `quick_think_llm` | `generation_llm` |
+| `deep_think_llm` | `review_llm` |
+| `quick_reasoning_effort` | `generation_reasoning_effort` |
+| `deep_reasoning_effort` | `review_reasoning_effort` |
+
+An explicit new name always wins over its legacy equivalent if both are set
+(e.g. `TRADINGAGENTS_GENERATION_LLM` over `TRADINGAGENTS_QUICK_THINK_LLM`);
+otherwise the legacy value is used. There is no need to migrate an existing
+`.env` — the legacy names are deprecated, not removed.
+
 ### Model overrides and LLM trace mode
 
 Useful when comparing local Ollama models against each other on the exact
 same ticker/date/analysts/depth/language.
 
-- **Per-run model overrides** (`run` and `batch`): `--TRADINGAGENTS_DEEP_THINK_LLM`
-  and `--TRADINGAGENTS_QUICK_THINK_LLM` (friendly aliases `--deep-think-llm`/
-  `--quick-think-llm` also work) override the configured models for that
-  invocation only, without touching `.env`. Quick inherits deep when no quick
-  override/config value is set — passing one model flag runs the entire
-  analysis on that model:
+- **Per-run model overrides** (`run` and `batch`): `--TRADINGAGENTS_GENERATION_LLM`
+  and `--TRADINGAGENTS_REVIEW_LLM` (friendly aliases `--generation-llm`/
+  `--review-llm` also work; the deprecated `--deep-think-llm`/`--quick-think-llm`
+  still work too, see [Legacy naming](#legacy-naming)) override the configured
+  models for that invocation only, without touching `.env`. Generation
+  inherits review when no generation override/config value is set — passing
+  one model flag runs the entire analysis on that model:
 
   ```bash
   # One model for everything this run:
   tradingagents batch --tickers NVDA --date 2026-09-30 \
     --analysts market,social,news,fundamentals --depth medium --language Spanish \
-    --TRADINGAGENTS_DEEP_THINK_LLM=gpt-oss:20b
+    --TRADINGAGENTS_REVIEW_LLM=gpt-oss:20b
 
   # Two distinct models:
   tradingagents batch --tickers NVDA --date 2026-09-30 \
-    --TRADINGAGENTS_DEEP_THINK_LLM=qwen3.8-flash-next:125b-a6b-q4_K_M \
-    --TRADINGAGENTS_QUICK_THINK_LLM=gpt-oss:20b
+    --TRADINGAGENTS_REVIEW_LLM=qwen3.8-flash-next:125b-a6b-q4_K_M \
+    --TRADINGAGENTS_GENERATION_LLM=gpt-oss:20b
   ```
 
-  An existing `.env`/config with a distinct, non-empty quick model keeps
+  An existing `.env`/config with a distinct, non-empty generation model keeps
   working unchanged when no CLI override is given — resolution order is:
-  explicit CLI quick override → quick follows a CLI deep override when no
-  quick override was given → configured quick model → inherit deep. The
-  resolved deep/quick models are printed at startup (`Deep model: ...` /
-  `Quick model: ...`) and recorded in the LLM trace manifest below, so both
-  always agree.
+  explicit CLI generation override → generation follows a CLI review override
+  when no generation override was given → configured generation model →
+  inherit review. The resolved generation/review models are printed at
+  startup (`Generation model: ...` / `Review model: ...`) and recorded in the
+  LLM trace manifest below, so both always agree.
 
 - **`--trace-llm`** (`run` and `batch`, off by default): saves a complete,
   auditable trace of every LLM call under `<output-dir>/<ticker>/debug/` —
@@ -322,23 +463,56 @@ same ticker/date/analysts/depth/language.
   commit/branch, package version), a snapshot of the prompt files actually in
   effect for the run (`prompts/`, since a long run's prompt files can change
   on disk mid-run), and one `calls/NNN_<stage>[_<attempt>]/` directory per LLM
-  call with the exact rendered request, the raw response, the parsed
-  structured result (or a recorded parse failure — never a fabricated one),
-  and timing/token metadata. Credential-shaped configuration keys (`api_key`,
-  `authorization`, `token`, `secret`, `password`, ...) are redacted; prompt
-  and response text never is. A `trace_summary.json` aggregates call counts
-  for quick before/after comparison. Normal console output is unaffected
-  beyond one `[DEBUG] LLM trace enabled: <path>` line; a trace-write failure
-  degrades to a `[WARN]` and never aborts the analysis.
+  call with the exact rendered request (including its `llm_role` —
+  `"generation"`/`"review"` — and `call_identity`), the raw response, the
+  parsed structured result (or a recorded parse failure — never a fabricated
+  one), and timing/token metadata. Credential-shaped configuration keys
+  (`api_key`, `authorization`, `token`, `secret`, `password`, ...) are
+  redacted; prompt and response text never is. A `trace_summary.json`
+  aggregates call counts for quick before/after comparison. Normal console
+  output is unaffected beyond one `[DEBUG] LLM trace enabled: <path>` line; a
+  trace-write failure degrades to a `[WARN]` and never aborts the analysis.
 
   ```bash
   tradingagents batch --tickers NVDA --date 2026-09-30 \
-    --TRADINGAGENTS_DEEP_THINK_LLM=gpt-oss:20b --trace-llm
+    --TRADINGAGENTS_REVIEW_LLM=gpt-oss:20b --trace-llm
   ```
 
   **Trace output contains full prompts and model outputs.** Treat it as a
   potentially sensitive analysis artifact — credentials are redacted, but the
   analysis content itself is not.
+
+- **`--seed`** (`run` and `batch`, friendly alias for `--TRADINGAGENTS_SEED`):
+  best-effort deterministic replay base seed, for benchmarking, debugging, and
+  reproducing a specific run — see "Best-effort deterministic replay" under
+  [Reproducibility](#reproducibility).
+
+- **Generation vs Review reasoning effort** — `--generation-reasoning-effort` /
+  `--review-reasoning-effort` (`run` and `batch`, aliases for
+  `TRADINGAGENTS_GENERATION_REASONING_EFFORT` / `TRADINGAGENTS_REVIEW_REASONING_EFFORT`;
+  the deprecated `--quick-reasoning-effort`/`--deep-reasoning-effort` still
+  work too) set each role's reasoning level independently, so you can compare
+  combinations instead of one effort applied everywhere:
+
+  ```bash
+  # DeepSeek V4 Pro: high reasoning on generation, lighter on review
+  TRADINGAGENTS_GENERATION_REASONING_EFFORT=high TRADINGAGENTS_REVIEW_REASONING_EFFORT=low \
+    tradingagents batch --tickers NVDA --TRADINGAGENTS_GENERATION_LLM=deepseek-v4-pro:cloud
+
+  # Qwen3.8 Flash Next
+  TRADINGAGENTS_GENERATION_REASONING_EFFORT=medium TRADINGAGENTS_REVIEW_REASONING_EFFORT=xhigh \
+    tradingagents batch --tickers NVDA --TRADINGAGENTS_REVIEW_LLM=qwen3.8-flash-next:125b-a6b-q4_K_M
+  ```
+
+  Valid levels are model/backend-specific (e.g. Qwen3.8 Flash Next:
+  `false`/`low`/`medium`/`xhigh`; DeepSeek V4 Pro: `false`/`low`/`high`/`max`)
+  — TradingAgents does not enforce a fixed list; the backend/model is the
+  final authority on whether a level is valid. Leaving a value unset sends no
+  override at all, so the backend/model's own default applies. Not every
+  provider supports `reasoning_effort` — today that's OpenAI's reasoning-tier
+  models and Ollama's OpenAI-compatible endpoint; other providers are
+  unaffected and never receive an unrecognized parameter. The effective value
+  actually sent (or its absence) is visible per call with `--trace-llm`.
 
 ### Risk as independent assessment, not a second debate
 
@@ -748,8 +922,6 @@ considered part of the implemented architecture until they are completed.
 
 ---
 
-# TradingAgents: Multi-Agents LLM Financial Trading Framework
-
 ## News
 
 <!-- news:start -->
@@ -785,6 +957,8 @@ Full release notes are in [CHANGELOG.md](CHANGELOG.md).
 > So we decided to fully open-source the framework. Looking forward to building impactful projects with you!
 
 ## TradingAgents Framework
+
+*This section describes the original multi-agent framework concept TradeProof is built on. The Analyst/Researcher/Trader/Risk team structure below is still the conceptual skeleton, but most of these teams' internal behavior has since changed substantially in this fork — see ["How TradeProof differs from upstream"](#how-tradeproof-differs-from-upstream).*
 
 TradingAgents is a multi-agent trading framework that mirrors the dynamics of real-world trading firms. By deploying specialized LLM-powered agents: from fundamental analysts, sentiment experts, and technical analysts, to trader, risk management team, the platform collaboratively evaluates market conditions and informs trading decisions. Moreover, these agents engage in dynamic discussions to pinpoint the optimal strategy.
 
@@ -832,9 +1006,9 @@ Our framework decomposes complex trading tasks into specialized roles.
 
 ### Installation
 
-Clone TradingAgents:
+Clone this fork (TradeProof):
 ```bash
-git clone https://github.com/TauricResearch/TradingAgents.git
+git clone https://github.com/ubanov/TradingAgents.git
 cd TradingAgents
 ```
 
@@ -901,6 +1075,8 @@ For Azure OpenAI, copy `.env.enterprise.example` to `.env.enterprise` and fill i
 For AWS Bedrock, install the extra with `pip install ".[bedrock]"`, set `llm_provider: "bedrock"`, configure AWS credentials (environment variables, `~/.aws/credentials`, or an IAM role) and `AWS_DEFAULT_REGION`, and use a Bedrock model ID, e.g. `us.anthropic.claude-opus-4-8-v1:0`.
 
 For local models, configure Ollama with `llm_provider: "ollama"`. The default endpoint is `http://localhost:11434/v1`; set `OLLAMA_BASE_URL` to point at a remote `ollama-serve`. Pull models with `ollama pull <name>`, and pick "Custom model ID" in the CLI for any model not listed by default.
+
+Ollama has no provider-side output cap, and a weaker/quantized local model can fail to ever emit a stop token: a real run observed a single call consuming an entire 131K-token context window (30+ minutes, no usable output) instead of a normal few-thousand-token response. As a safety guardrail, this fork defaults Ollama's `max_tokens` to `8192` output tokens; set `TRADINGAGENTS_MAX_TOKENS` to override it (for Ollama or any other provider). This is an output-token cap, not the context length (`num_ctx`), which is unaffected.
 
 For any other OpenAI-compatible server (vLLM, LM Studio, llama.cpp, or a custom relay), use `llm_provider: "openai_compatible"` and set the endpoint via `backend_url` (or `TRADINGAGENTS_LLM_BACKEND_URL`), e.g. `http://localhost:8000/v1` for vLLM or `http://localhost:1234/v1` for LM Studio. The model is whatever your server serves. No key is needed for local servers; set `OPENAI_COMPATIBLE_API_KEY` when the endpoint requires one.
 
@@ -975,8 +1151,8 @@ from tradingagents.default_config import DEFAULT_CONFIG
 
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "openai"        # e.g. openai, google, anthropic, deepseek, groq, ollama; openai_compatible covers any OpenAI-compatible endpoint (vLLM, LM Studio, llama.cpp, ...)
-config["deep_think_llm"] = "gpt-6-sol"    # Model for complex reasoning
-config["quick_think_llm"] = "gpt-6-luna"   # Model for quick tasks
+config["generation_llm"] = "gpt-6-luna"   # see "Model roles: Generation vs Review"
+config["review_llm"] = "gpt-6-sol"
 config["max_debate_rounds"] = 2
 
 ta = TradingAgentsGraph(debug=True, config=config)
@@ -1079,17 +1255,35 @@ Language model sampling is non-deterministic. Even at a fixed temperature, provi
 
 Live data moves. News, StockTwits, and Reddit return different content as time passes, so a run today sees different inputs than a run last week even for the same historical trade date. Pin the analysis date to hold the price and indicator window fixed, but the social and news sources still reflect "now".
 
-To reduce variation you can lower the sampling temperature. Set `temperature` in your config (or `TRADINGAGENTS_TEMPERATURE` in `.env`); lower values make models that honor it more repeatable. The current curated models are reasoning-first and largely ignore temperature, so for tighter reproducibility name a non-reasoning model in your config, or in `TRADINGAGENTS_DEEP_THINK_LLM` and `TRADINGAGENTS_QUICK_THINK_LLM`. Any model ID your provider serves is accepted, whether or not the picker lists it.
+To reduce variation you can lower the sampling temperature. Set `temperature` in your config (or `TRADINGAGENTS_TEMPERATURE` in `.env`); lower values make models that honor it more repeatable. The current curated models are reasoning-first and largely ignore temperature, so for tighter reproducibility name a non-reasoning model in your config, or in `TRADINGAGENTS_GENERATION_LLM` and `TRADINGAGENTS_REVIEW_LLM` (see "Model roles: Generation vs Review"). Any model ID your provider serves is accepted, whether or not the picker lists it.
 
 ```python
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "openai"
 config["temperature"] = 0.0
 # Reasoning models ignore temperature. For tighter reproducibility, name a
-# non-reasoning model in deep_think_llm / quick_think_llm.
+# non-reasoning model in generation_llm / review_llm.
 ```
 
 What does not vary anymore: the analyzed company identity is resolved deterministically from the ticker before any agent runs, and the market analyst grounds exact price and indicator claims in a verified data snapshot. Earlier reports of "different companies" or fabricated price levels across runs are addressed by these two mechanisms.
+
+### Best-effort deterministic replay
+
+For benchmarking, debugging, and reproducing a specific run, the non-interactive `run`/`batch` commands accept a `--seed` (or `TRADINGAGENTS_SEED`):
+
+```bash
+# --seed 0 (the default) auto-generates a base seed and prints it:
+tradingagents batch --tickers NVDA,AMD --seed 0
+# Run seed: 184736291
+
+# Reuse that exact base seed to attempt reproducing the run:
+tradingagents batch --tickers NVDA,AMD --seed 184736291
+# (equivalently: TRADINGAGENTS_SEED=184736291)
+```
+
+Internally, that one base seed is never reused as-is for every LLM call; each call derives its own stable seed from the base seed plus its ticker, pipeline stage, and logical call identity (e.g. "Bull Researcher review 2" vs "Research Verifier JSON fallback"), so results do not depend on the order calls happened to run in. A batch resolves exactly one base seed for the whole run, not one per ticker: `batch --tickers NVDA,AMD --seed 12345` and `batch --tickers AMD --seed 12345` derive the same seeds for AMD's own calls either way. The seed is only forwarded to providers with verified support for it (OpenAI, Azure OpenAI, Ollama); other providers keep running exactly as before, with no seed applied. The effective base seed is also saved in `summary.md`/`summary.json`, `result.json`, and the `--trace-llm` debug manifest, so a past run's seed can always be recovered.
+
+**This is best-effort, not a guarantee of bit-for-bit identical output.** Even with the same seed, results can still vary with the model/backend version, quantization, hardware or kernel differences, non-deterministic GPU operations, a provider without seed support, external tool/API data (news, prices) changing between runs, or any change to the code, prompts, or config.
 
 Backtest results are not guaranteed to match any published figure. Returns depend on the model, the temperature, the date range, data quality, and the sampling above. Treat the framework as a research scaffold for studying multi-agent analysis, not as a strategy with a fixed, replicable return.
 

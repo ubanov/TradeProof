@@ -28,8 +28,11 @@ from tradingagents.prompts.loader import render_agent_prompt
 logger = logging.getLogger(__name__)
 
 
-def create_research_manager(llm):
-    structured_llm = bind_structured(llm, ResearchPlan, "Research Manager")
+def create_research_manager(generation_llm):
+    """Synthesizes the already-audited debate into a plan -- a generation
+    operation, not an auditor role (see fork README: "Model roles:
+    Generation vs Review")."""
+    structured_llm = bind_structured(generation_llm, ResearchPlan, "Research Manager")
 
     def research_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
@@ -113,10 +116,12 @@ def create_research_manager(llm):
 
         investment_plan = invoke_structured_or_freetext(
             structured_llm,
-            llm,
+            generation_llm,
             prompt,
             render_research_plan,
             "Research Manager",
+            call_identity="research_manager",
+            llm_role="generation",
         )
 
         # Deterministic, LLM-free pass: the Verifier already checked the Bull/

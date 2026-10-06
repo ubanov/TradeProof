@@ -30,18 +30,21 @@ from cli.stats_handler import StatsCallbackHandler
 from tradingagents.agents.fallback_log import fallback_count, reset_fallback_count
 from tradingagents.agents.rating import is_review
 from tradingagents.dataflows.symbols import safe_ticker_component
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import DEFAULT_CONFIG, resolve_role_config
 from tradingagents.graph.analyst_execution import (
     build_analyst_execution_plan,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.llm_trace import (
     LLMTraceCallbackHandler,
+    SeedContext,
+    set_active_seed_context,
     set_active_tracer,
     snapshot_prompts,
     write_run_manifest,
 )
 from tradingagents.reporting import write_report_tree
+from tradingagents.run_seed import SEED_CAPABLE_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +169,7 @@ class AnalysisExecution:
     stats: dict[str, Any]
     graph: TradingAgentsGraph
     fallback_warnings: int = 0
+    base_seed: int | None = None
 
 
 def _run_directory(config: dict, ticker: str, trade_date: str) -> Path:
@@ -221,12 +225,32 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
             config[key] = selected_rounds[key]
     config["quick_think_llm"] = selections["quick_think_llm"]
     config["deep_think_llm"] = selections["deep_think_llm"]
+    # Reset the canonical keys copied from DEFAULT_CONFIG above (already
+    # non-None, since DEFAULT_CONFIG is itself always pre-resolved) back to
+    # None, so resolve_role_config -- called downstream, e.g. in
+    # execute_analysis -- re-derives generation_llm/review_llm from the
+    # legacy values just set above instead of keeping DEFAULT_CONFIG's own
+    # stale resolution and silently ignoring this run's selection (see fork
+    # README: "Legacy naming"). A selections dict that carries an explicit
+    # canonical override (the headless config builder's new --generation-llm/
+    # --review-llm flags) already folded it into these same legacy keys
+    # before calling here, so nothing is lost.
+    config["generation_llm"] = None
+    config["review_llm"] = None
     config["backend_url"] = selections["backend_url"]
     config["llm_provider"] = selections["llm_provider"].lower()
     # Provider-specific thinking configuration
     config["google_thinking_level"] = selections.get("google_thinking_level")
     config["openai_reasoning_effort"] = selections.get("openai_reasoning_effort")
     config["anthropic_effort"] = selections.get("anthropic_effort")
+    # Quick vs Deep reasoning effort (see fork README): per-role, independent
+    # of which model each is set to. The interactive flow does not prompt for
+    # these (selections.get returns None, meaning no override), exactly like
+    # the three knobs above; the headless config builder sets them explicitly.
+    config["quick_reasoning_effort"] = selections.get("quick_reasoning_effort")
+    config["deep_reasoning_effort"] = selections.get("deep_reasoning_effort")
+    config["generation_reasoning_effort"] = None
+    config["review_reasoning_effort"] = None
     config["output_language"] = selections.get("output_language", "English")
     # --checkpoint/--no-checkpoint overrides only when explicitly given; omitting
     # the flag preserves TRADINGAGENTS_CHECKPOINT_ENABLED / the default (#976).
@@ -235,9 +259,33 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     return config
 
 
+def _apply_seed_context(*, base_seed: int | None, ticker: str, config: dict) -> bool:
+    """Set up this run's best-effort deterministic-replay seed context (see
+    ``tradingagents/run_seed.py``), or explicitly clear any context left
+    active by a previous ticker in the same batch process.
+
+    Always called (even when ``base_seed`` is None): contextvars persist
+    across sequential calls in the same thread, so a batch run that seeds
+    ticker 1 but not ticker 2 must not leak ticker 1's context into ticker 2
+    (same reasoning as ``_start_llm_trace``'s tracer reset).
+
+    Returns whether this run's provider is seed-capable, for the manifest.
+    """
+    if base_seed is None:
+        set_active_seed_context(None)
+        return False
+    provider_supports_seed = config.get("llm_provider", "").lower() in SEED_CAPABLE_PROVIDERS
+    set_active_seed_context(
+        SeedContext(base_seed=base_seed, ticker=ticker, provider_supports_seed=provider_supports_seed)
+    )
+    return provider_supports_seed
+
+
 def _start_llm_trace(
     *, trace_llm: bool, output_dir: Path | None, ticker: str, analysis_date: str,
     selected_analysts: list[str], config: dict,
+    configured_seed: int | None = None, base_seed: int | None = None,
+    seed_provider_supported: bool = False,
 ) -> LLMTraceCallbackHandler | None:
     """Set up opt-in LLM trace mode for this run, or explicitly clear any
     tracer left active by a previous ticker in the same batch process.
@@ -272,6 +320,9 @@ def _start_llm_trace(
         config=config,
         prompt_hashes=prompt_hashes,
         on_warn=_on_warn,
+        configured_seed=configured_seed,
+        base_seed=base_seed,
+        seed_provider_supported=seed_provider_supported,
     )
     return tracer
 
@@ -289,16 +340,36 @@ def execute_analysis(
     on_chunk: Callable[[dict], None] | None = None,
     on_checkpoint: Callable[[TradingAgentsGraph], None] | None = None,
     trace_llm: bool = False,
+    base_seed: int | None = None,
+    configured_seed: int | None = None,
 ) -> AnalysisExecution:
-    """Run one analysis through the shared interactive/headless execution path."""
+    """Run one analysis through the shared interactive/headless execution path.
+
+    ``base_seed`` is the already-resolved (see ``run_seed.resolve_base_seed``)
+    best-effort deterministic-replay seed for this whole run -- None means no
+    seeding at all (the default, and the only behavior for any caller that
+    does not pass it, e.g. the interactive flow). ``configured_seed`` is only
+    for the trace manifest, so a reader can see what the user actually asked
+    for (0 = auto) alongside the base seed actually used.
+    """
+    # The single compatibility layer (see fork README: "Legacy naming"):
+    # fills in generation_llm/review_llm/*_reasoning_effort from legacy
+    # quick/deep config whenever a caller only set those, so every entry
+    # point -- CLI, interactive, or a bare dict a test constructs directly --
+    # resolves the same way before anything below reads the canonical keys.
+    config = resolve_role_config(config)
+
     # Per-ticker, not per-process: a batch run must not accumulate one running
     # total across every ticker it processes.
     reset_fallback_count()
     build_analyst_execution_plan(selected_analysts)
     stats_handler = stats_handler or StatsCallbackHandler()
+    seed_provider_supported = _apply_seed_context(base_seed=base_seed, ticker=ticker, config=config)
     tracer = _start_llm_trace(
         trace_llm=trace_llm, output_dir=output_dir, ticker=ticker,
         analysis_date=analysis_date, selected_analysts=selected_analysts, config=config,
+        configured_seed=configured_seed, base_seed=base_seed,
+        seed_provider_supported=seed_provider_supported,
     )
     callbacks = [stats_handler] + ([tracer] if tracer is not None else [])
     graph = TradingAgentsGraph(
@@ -354,7 +425,8 @@ def execute_analysis(
     if tracer is not None:
         tracer.write_summary(
             stats=stats, elapsed_seconds=duration_seconds,
-            deep_model=config.get("deep_think_llm", ""), quick_model=config.get("quick_think_llm", ""),
+            generation_model=config.get("generation_llm", ""),
+            review_model=config.get("review_llm", ""),
         )
 
     if stream_error is not None:
@@ -405,6 +477,7 @@ def execute_analysis(
         stats=stats,
         graph=graph,
         fallback_warnings=fallback_count(),
+        base_seed=base_seed,
     )
 
 

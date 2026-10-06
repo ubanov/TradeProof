@@ -250,14 +250,20 @@ def _review_patch_to_review_dict(patch: ReviewCanonicalPatch) -> dict:
 
 
 def recover_initial_thesis(
-    fallback_text: str, llm, agent_name: str
+    fallback_text: str, llm, agent_name: str, *, llm_role: str | None = None
 ) -> tuple[dict | None, CanonicalRecoveryStatus]:
     """Attempt to reconstruct a minimal canonical initial thesis from the
     free text ``agent_name`` just produced. Based exclusively on that text --
-    no tools, no new evidence, no re-reading of analyst reports."""
+    no tools, no new evidence, no re-reading of analyst reports.
+
+    ``llm_role`` is never fixed here -- it is whatever role the fallback call
+    being recovered used (see fork README: "Model roles: Generation vs
+    Review"), passed straight through by the caller.
+    """
     try:
         response = traced_invoke(
-            llm, _initial_recovery_prompt(fallback_text), attempt="canonical_recovery"
+            llm, _initial_recovery_prompt(fallback_text),
+            attempt="canonical_recovery", llm_role=llm_role,
         )
         patch = _parse_patch(response.content, InitialThesisCanonicalPatch)
         if patch is None:
@@ -296,16 +302,22 @@ def recover_initial_thesis(
 
 
 def recover_review_patch(
-    fallback_text: str, prior_thesis: dict | None, llm, agent_name: str
+    fallback_text: str, prior_thesis: dict | None, llm, agent_name: str,
+    *, llm_role: str | None = None,
 ) -> tuple[dict | None, CanonicalRecoveryStatus]:
     """Attempt to reconstruct a minimal canonical review patch from the free
     text ``agent_name`` just produced, expressed as a mutation over
-    ``prior_thesis`` -- never a full reconstruction of the thesis."""
+    ``prior_thesis`` -- never a full reconstruction of the thesis.
+
+    ``llm_role`` is inherited from the fallback call being recovered, never
+    fixed to a constant role (see fork README: "Model roles: Generation vs
+    Review").
+    """
     try:
         response = traced_invoke(
             llm,
             _review_recovery_prompt(fallback_text, prior_thesis),
-            attempt="canonical_recovery",
+            attempt="canonical_recovery", llm_role=llm_role,
         )
         patch = _parse_patch(response.content, ReviewCanonicalPatch)
         if patch is None:

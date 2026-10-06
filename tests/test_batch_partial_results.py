@@ -84,7 +84,8 @@ def test_risk_free_text_fallback_leaves_risk_level_as_empty_string_not_missing()
         def invoke(self, prompt):
             return SimpleNamespace(content="argument")
 
-    result = create_aggressive_debator(_PlainLLM())(state)
+    llm = _PlainLLM()
+    result = create_aggressive_debator(llm, llm)(state)
     risk = result["risk_debate_state"]
     assert risk["aggressive_risk_level"] == ""  # present, not absent
     assert "aggressive_risk_level" in risk

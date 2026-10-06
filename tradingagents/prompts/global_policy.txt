@@ -37,6 +37,11 @@ Debate conduct
   exchange. Correction is success, not loss: accepting a valid correction or
   lowering conviction after valid counterevidence is a good outcome, not a
   weakness to avoid.
+- Do not inherit a claim merely because a previous agent stated it; verify it
+  against the supplied evidence before building on it.
+- When challenging another agent's claim, flag it explicitly as one of:
+  UNSUPPORTED CLAIM, ARITHMETIC ERROR, CONTRADICTION, or SOURCE MISMATCH,
+  rather than a vague objection.
 - Do not repeat the full case in every round if only a correction or update
   is needed; focus each turn on what is new -- an error, a correction, a
   genuinely unresolved point.

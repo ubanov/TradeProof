@@ -182,6 +182,18 @@ class VerificationFinding(BaseModel):
         ),
     )
 
+    @field_validator("category", "severity", mode="before")
+    @classmethod
+    def _normalise_enum_casing(cls, value):
+        # Case/whitespace only -- mirrors ResearchVerification._normalise_status
+        # below. A JSON-fallback reconstruction (see research_verifier.py's
+        # _parse_freetext_result) is otherwise semantically identical but
+        # case-mismatched (e.g. "arithmetic_error" for ARITHMETIC_ERROR) and
+        # must not be discarded wholesale over that alone. This is exact-name
+        # equivalence, never a fuzzy/semantic mapping: an unrecognised name
+        # (e.g. "BAD_MATH_THING") still fails validation normally.
+        return value.strip().upper() if isinstance(value, str) else value
+
     @field_validator("arithmetic", mode="before")
     @classmethod
     def _normalise_arithmetic(cls, value):

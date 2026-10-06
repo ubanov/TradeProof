@@ -68,7 +68,8 @@ def test_helper_marks_empty_and_passes_through():
 @pytest.mark.parametrize("factory", [create_bull_researcher, create_bear_researcher])
 def test_researcher_initial_thesis_has_no_phantom_opponent(factory):
     captured = {}
-    factory(_capturing_llm(captured))(_investment_state(""))
+    llm = _capturing_llm(captured)
+    factory(llm, llm)(_investment_state(""))
     assert "independent initial thesis" in captured["prompts"][0]
 
 
@@ -84,5 +85,6 @@ def test_researcher_passes_real_opponent_argument():
         "rebuttal_history": "",
         "debate_round": 0,
     })
-    create_bull_researcher(_capturing_llm(captured))(state)
+    llm = _capturing_llm(captured)
+    create_bull_researcher(llm, llm)(state)
     assert "valuation is stretched" in captured["prompts"][0]

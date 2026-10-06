@@ -36,10 +36,14 @@ from tradingagents.prompts.loader import render_agent_prompt
 from .verification import render_verification_history
 
 
-def _create_research_repair(llm, side: str):
+def _create_research_repair(review_llm, side: str):
+    """Repair is a review operation end to end (correct a claim already
+    flagged by the Verifier) -- see fork README: "Model roles: Generation vs
+    Review". A single role, so ``create_bull_repair``/``create_bear_repair``
+    take just the one LLM, unlike Bull/Bear's own initial-vs-review split."""
     side_key = side.lower()
     other_key = "bear" if side_key == "bull" else "bull"
-    structured_llm = bind_structured(llm, ResearchReviewOutcome, f"{side} Repair")
+    structured_llm = bind_structured(review_llm, ResearchReviewOutcome, f"{side} Repair")
 
     def repair_node(state) -> dict:
         debate = state["investment_debate_state"]
@@ -81,11 +85,13 @@ def _create_research_repair(llm, side: str):
             ),
         ) + get_language_instruction()
 
-        rendered, review_dict, _recovery_status = invoke_review(
-            structured_llm, llm, prompt, f"{side} Repair",
-            prior_thesis=debate.get(f"{side_key}_thesis"),
-        )
         repair_round = debate.get("repair_rounds", 0) + 1
+        rendered, review_dict, _recovery_status = invoke_review(
+            structured_llm, review_llm, prompt, f"{side} Repair",
+            prior_thesis=debate.get(f"{side_key}_thesis"),
+            call_identity=f"repair_{repair_round}",
+            llm_role="review",
+        )
         repaired = f"{side} Analyst (Repair {repair_round}): {rendered}"
 
         new_debate = {
@@ -143,9 +149,9 @@ def _create_research_repair(llm, side: str):
     return repair_node
 
 
-def create_bull_repair(llm):
-    return _create_research_repair(llm, "Bull")
+def create_bull_repair(review_llm):
+    return _create_research_repair(review_llm, "Bull")
 
 
-def create_bear_repair(llm):
-    return _create_research_repair(llm, "Bear")
+def create_bear_repair(review_llm):
+    return _create_research_repair(review_llm, "Bear")

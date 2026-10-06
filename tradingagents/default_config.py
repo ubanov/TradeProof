@@ -9,8 +9,22 @@ _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 # their .env file.
 _ENV_OVERRIDES = {
     "TRADINGAGENTS_LLM_PROVIDER":         "llm_provider",
+    # Legacy model-role names (deprecated, see fork README: "Legacy naming").
+    # Still accepted as input; resolve_role_config() below is the single
+    # compatibility layer that maps them onto the canonical generation_llm /
+    # review_llm keys every internal reader uses from here on.
     "TRADINGAGENTS_DEEP_THINK_LLM":       "deep_think_llm",
     "TRADINGAGENTS_QUICK_THINK_LLM":      "quick_think_llm",
+    "TRADINGAGENTS_QUICK_REASONING_EFFORT": "quick_reasoning_effort",
+    "TRADINGAGENTS_DEEP_REASONING_EFFORT":  "deep_reasoning_effort",
+    # Canonical model-role config (see fork README: "Model roles: Generation
+    # vs Review"). generation = produce/structure/synthesize/propose/decide;
+    # review = challenge/verify/audit/correct/repair -- a function in the
+    # pipeline, not a statement about model size/speed/cost.
+    "TRADINGAGENTS_GENERATION_LLM":              "generation_llm",
+    "TRADINGAGENTS_REVIEW_LLM":                  "review_llm",
+    "TRADINGAGENTS_GENERATION_REASONING_EFFORT": "generation_reasoning_effort",
+    "TRADINGAGENTS_REVIEW_REASONING_EFFORT":     "review_reasoning_effort",
     "TRADINGAGENTS_LLM_BACKEND_URL":      "backend_url",
     "TRADINGAGENTS_OUTPUT_LANGUAGE":      "output_language",
     "TRADINGAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
@@ -20,6 +34,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
     "TRADINGAGENTS_MAX_TOKENS":           "max_tokens",
+    "TRADINGAGENTS_SEED":                 "seed",
     # Provider-specific reasoning/thinking knobs (None = each provider's own
     # default). Settable here for non-interactive runs; the CLI also offers an
     # interactive choice, which is skipped when the matching var is set.
@@ -69,51 +84,124 @@ def _apply_env_overrides(config: dict) -> dict:
     return config
 
 
+def _resolve_pair(
+    configured_primary: str | None, configured_secondary: str | None,
+    cli_primary: str | None, cli_secondary: str | None,
+) -> tuple[str, str]:
+    """Shared precedence algorithm behind ``resolve_effective_models`` and
+    ``resolve_effective_roles``: an explicit, non-empty CLI secondary override
+    always wins; otherwise an explicit CLI primary override makes secondary
+    follow it too (one flag runs the whole analysis on that model); otherwise
+    secondary falls back to its own configured value if non-empty; otherwise
+    secondary inherits whatever primary resolved to.
+
+    An explicitly given but empty/whitespace CLI secondary value is treated
+    the same as "no secondary override", not as "configured secondary".
+    """
+    configured_primary = (configured_primary or "").strip()
+    configured_secondary = (configured_secondary or "").strip()
+
+    cli_primary_clean = (cli_primary or "").strip()
+    cli_secondary_given = cli_secondary is not None
+    cli_secondary_clean = (cli_secondary or "").strip()
+
+    effective_primary = cli_primary_clean or configured_primary
+
+    if cli_secondary_given and cli_secondary_clean:
+        effective_secondary = cli_secondary_clean
+    elif cli_secondary_given or cli_primary_clean:
+        effective_secondary = effective_primary
+    elif configured_secondary:
+        effective_secondary = configured_secondary
+    else:
+        effective_secondary = effective_primary
+
+    return effective_primary, effective_secondary
+
+
 def resolve_effective_models(
     config: dict, cli_deep: str | None = None, cli_quick: str | None = None
 ) -> tuple[str, str]:
     """Single source of truth for which deep/quick model a run actually uses.
 
+    Deprecated naming (see fork README: "Legacy naming") -- kept for backward
+    compatibility. ``resolve_effective_roles`` is the canonical
+    generation/review equivalent; both share the same precedence algorithm
+    (``_resolve_pair``).
+
     ``cli_deep``/``cli_quick`` are CLI-flag values; ``None`` means the flag was
-    not given at all. An explicitly given but empty/whitespace CLI quick value
-    (``--TRADINGAGENTS_QUICK_THINK_LLM=""``) is treated the same as "no quick
-    override", not as "configured quick".
-
-    Resolution order for quick:
-    1. An explicit, non-empty CLI quick override always wins.
-    2. Otherwise, if a CLI deep override was given, quick follows it too --
-       passing one model flag is meant to run the entire analysis on that
-       model unless a quick override is explicitly supplied.
-    3. Otherwise, the configured quick model, if it is non-empty (existing
-       user configs with a distinct quick model keep working unchanged).
-    4. Otherwise, quick inherits whatever deep resolved to.
+    not given at all.
     """
-    configured_deep = (config.get("deep_think_llm") or "").strip()
-    configured_quick = (config.get("quick_think_llm") or "").strip()
-
-    cli_deep_clean = (cli_deep or "").strip()
-    cli_quick_given = cli_quick is not None
-    cli_quick_clean = (cli_quick or "").strip()
-
-    effective_deep = cli_deep_clean or configured_deep
-
-    if cli_quick_given and cli_quick_clean:
-        effective_quick = cli_quick_clean
-    elif cli_quick_given:
-        # Explicitly given but empty/whitespace: inherit deep, not configured_quick.
-        effective_quick = effective_deep
-    elif cli_deep_clean:
-        # A deep override with no quick override at all: the whole run follows it.
-        effective_quick = effective_deep
-    elif configured_quick:
-        effective_quick = configured_quick
-    else:
-        effective_quick = effective_deep
-
-    return effective_deep, effective_quick
+    return _resolve_pair(
+        config.get("deep_think_llm"), config.get("quick_think_llm"), cli_deep, cli_quick
+    )
 
 
-DEFAULT_CONFIG = _apply_env_overrides({
+def resolve_effective_roles(
+    config: dict, cli_review: str | None = None, cli_generation: str | None = None
+) -> tuple[str, str]:
+    """Single source of truth for which generation/review model a run
+    actually uses (see fork README: "Model roles: Generation vs Review").
+
+    ``cli_review``/``cli_generation`` are CLI-flag values; ``None`` means the
+    flag was not given at all. ``cli_review`` plays the same "primary" role
+    ``cli_deep`` does in ``resolve_effective_models`` -- an explicit
+    ``--review-llm`` alone runs the whole analysis on that model unless
+    ``--generation-llm`` is also given, mirroring the existing
+    ``--deep-think-llm`` behavior users already know.
+    """
+    return _resolve_pair(
+        config.get("review_llm"), config.get("generation_llm"), cli_review, cli_generation
+    )
+
+
+# Hardcoded fallback when neither the canonical nor the legacy config/env
+# value is set for a role -- applied only inside resolve_role_config, never
+# baked directly into the generation_llm/review_llm dict entries below, so
+# "was this explicitly configured" can still be distinguished from "this is
+# just the default" during resolution.
+_GENERATION_LLM_DEFAULT = "gpt-6-luna"
+_REVIEW_LLM_DEFAULT = "gpt-6-sol"
+
+
+def resolve_role_config(config: dict) -> dict:
+    """The single compatibility layer between canonical generation/review
+    naming and legacy quick/deep naming (see fork README: "Legacy naming" /
+    "Model roles: Generation vs Review"). Mutates and returns ``config`` in
+    place, so it resolves the same way regardless of how ``config`` was
+    built -- DEFAULT_CONFIG at import time, a CLI-assembled dict, or a bare
+    dict a caller passes straight into ``TradingAgentsGraph``.
+
+    Precedence per role: explicit canonical name (``generation_llm`` /
+    ``review_llm``) > legacy equivalent (``quick_think_llm`` -> generation,
+    ``deep_think_llm`` -> review) > hardcoded default. The resolved value is
+    mirrored back onto the legacy key too, so code that still reads it (the
+    interactive CLI flow's selections/remembered-preferences machinery) sees
+    the exact same, single, correctly-resolved value -- never two diverging
+    sources of truth. Reasoning effort follows the identical rule, with no
+    hardcoded default (unset means "send no override, the backend/model's
+    own default applies").
+    """
+    config["generation_llm"] = (
+        config.get("generation_llm") or config.get("quick_think_llm") or _GENERATION_LLM_DEFAULT
+    )
+    config["review_llm"] = (
+        config.get("review_llm") or config.get("deep_think_llm") or _REVIEW_LLM_DEFAULT
+    )
+    config["generation_reasoning_effort"] = (
+        config.get("generation_reasoning_effort") or config.get("quick_reasoning_effort")
+    )
+    config["review_reasoning_effort"] = (
+        config.get("review_reasoning_effort") or config.get("deep_reasoning_effort")
+    )
+    config["quick_think_llm"] = config["generation_llm"]
+    config["deep_think_llm"] = config["review_llm"]
+    config["quick_reasoning_effort"] = config["generation_reasoning_effort"]
+    config["deep_reasoning_effort"] = config["review_reasoning_effort"]
+    return config
+
+
+DEFAULT_CONFIG = resolve_role_config(_apply_env_overrides({
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR") or os.path.join(_TRADINGAGENTS_HOME, "logs"),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR") or os.path.join(_TRADINGAGENTS_HOME, "cache"),
     "memory_log_path": os.getenv("TRADINGAGENTS_MEMORY_LOG_PATH") or os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md"),
@@ -123,8 +211,23 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "memory_log_max_entries": None,
     # LLM settings
     "llm_provider": "openai",
-    "deep_think_llm": "gpt-6-sol",
-    "quick_think_llm": "gpt-6-luna",
+    # Canonical model-role keys (see fork README: "Model roles: Generation vs
+    # Review"). Left unset (None) here -- resolve_role_config (called below,
+    # wrapping this whole literal) is what actually fills these in, honoring
+    # explicit canonical > legacy quick/deep > hardcoded default, so "this
+    # was never set" stays distinguishable from "this is just the default"
+    # until that single resolution step runs.
+    "generation_llm": None,
+    "review_llm": None,
+    "generation_reasoning_effort": None,
+    "review_reasoning_effort": None,
+    # Legacy aliases (deprecated, see fork README "Legacy naming": quick ->
+    # generation, deep -> review). Still accepted as input; resolve_role_config
+    # resolves and mirrors them, so no other code should read these directly.
+    "quick_think_llm": None,
+    "deep_think_llm": None,
+    "quick_reasoning_effort": None,
+    "deep_reasoning_effort": None,
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a
@@ -149,6 +252,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # unbounded reasoning/output and hangs or trips a gateway idle timeout
     # (e.g. some deepseek-v4-flash deployments, #1204).
     "max_tokens": None,
+    # Best-effort deterministic replay base seed. 0 means "auto-generate a
+    # fresh base seed for this run and print it"; a non-zero value reuses it.
+    # See fork README: "Reproducible runs / Best-effort deterministic replay".
+    "seed": 0,
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,
@@ -219,4 +326,4 @@ DEFAULT_CONFIG = _apply_env_overrides({
         ".SA":  "^BVSP",       # B3 Brazil (Ibovespa)
         "":     "SPY",         # default for US-listed tickers (no suffix)
     },
-})
+}))

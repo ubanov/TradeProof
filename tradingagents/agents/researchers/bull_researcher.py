@@ -17,12 +17,20 @@ from tradingagents.prompts.loader import render_agent_prompt
 from .review_outcomes import review_guidance
 
 
-def create_bull_researcher(llm):
+def create_bull_researcher(generation_llm, review_llm):
+    """The initial thesis is a generation operation (produce/structure a
+    position from the evidence); each review round is a review operation
+    (challenge the opponent, audit and correct your own prior claims) -- see
+    fork README: "Model roles: Generation vs Review". One researcher, one
+    node, two LLMs: no agent duplication, since ``is_initial`` below already
+    decides which phase a given turn is in and canonical recovery (on a
+    fallback) naturally inherits whichever LLM its own call used.
+    """
     structured_initial_llm = bind_structured(
-        llm, InitialResearchThesis, "Bull Researcher (initial)"
+        generation_llm, InitialResearchThesis, "Bull Researcher (initial)"
     )
     structured_review_llm = bind_structured(
-        llm, ResearchReviewOutcome, "Bull Researcher (review)"
+        review_llm, ResearchReviewOutcome, "Bull Researcher (review)"
     )
 
     def bull_node(state) -> dict:
@@ -67,7 +75,8 @@ def create_bull_researcher(llm):
             prompt += get_language_instruction()
 
             rendered, thesis_dict, initial_recovery_status = invoke_initial_thesis(
-                structured_initial_llm, llm, prompt, "Bull Researcher"
+                structured_initial_llm, generation_llm, prompt, "Bull Researcher",
+                call_identity="initial", llm_role="generation",
             )
             argument = f"Bull Analyst (Initial): {rendered}"
 
@@ -125,10 +134,12 @@ def create_bull_researcher(llm):
 
             rendered, review_dict, review_recovery_status = invoke_review(
                 structured_review_llm,
-                llm,
+                review_llm,
                 prompt,
                 "Bull Researcher",
                 prior_thesis=investment_debate_state.get("bull_thesis"),
+                call_identity=f"review_{review_round}",
+                llm_role="review",
             )
             argument = f"Bull Analyst (Review {review_round}): {rendered}"
 

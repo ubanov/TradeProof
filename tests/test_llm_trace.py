@@ -13,21 +13,26 @@ import pytest
 
 from tradingagents.llm_trace import (
     LLMTraceCallbackHandler,
+    SeedContext,
     record_structured_parse_result,
     redact,
+    set_active_seed_context,
     set_active_tracer,
     snapshot_prompts,
     traced_invoke,
     traced_node,
     write_run_manifest,
 )
+from tradingagents.run_seed import derive_call_seed
 
 
 @pytest.fixture(autouse=True)
 def _reset_tracer():
     set_active_tracer(None)
+    set_active_seed_context(None)
     yield
     set_active_tracer(None)
+    set_active_seed_context(None)
 
 
 def _sys(content="sys prompt"):
@@ -191,7 +196,241 @@ def test_traced_invoke_tags_attempt_for_the_duration_of_one_call():
     assert _current_attempt.get() == "normal"  # reset after the call
 
 
-# --- 17-20: secret redaction --------------------------------------------
+class _TracedFakeLLM:
+    """Drives the tracer's callback methods itself, the way a real LangChain
+    chat model would during ``.invoke()`` -- so a call routed through
+    ``traced_invoke`` (which sets the llm_role/call_identity/attempt
+    contextvars around the call) ends up recorded exactly like a real one."""
+
+    def __init__(self, tracer, run_id="run-x"):
+        self.tracer = tracer
+        self.run_id = run_id
+
+    def invoke(self, prompt, **kwargs):
+        self.tracer.on_chat_model_start(
+            {"name": "fake-model"}, [[]], run_id=self.run_id,
+            invocation_params={"model": "fake-model", **kwargs},
+        )
+        message = SimpleNamespace(
+            content="result", tool_calls=None, usage_metadata=None,
+            response_metadata={"finish_reason": "stop"},
+        )
+        response = SimpleNamespace(generations=[[SimpleNamespace(message=message)]])
+        self.tracer.on_llm_end(response, run_id=self.run_id)
+        return message
+
+
+@pytest.mark.unit
+def test_trace_records_llm_role_model_reasoning_effort_seed_and_call_identity(tmp_path):
+    """One call must let a reader audit stage, llm_role, model,
+    reasoning_effort, seed, and call_identity together (see fork README:
+    "Model roles: Generation vs Review")."""
+    tracer = LLMTraceCallbackHandler(tmp_path / "debug")
+    set_active_seed_context(SeedContext(base_seed=12345, ticker="NVDA", provider_supports_seed=True))
+    try:
+        llm = _TracedFakeLLM(tracer)
+        traced_node(
+            "Research Verifier",
+            lambda state: traced_invoke(
+                llm, "prompt", attempt="structured",
+                call_identity="review_1", llm_role="review",
+            ),
+        )(None)
+    finally:
+        set_active_seed_context(None)
+
+    call_dir = _call_dir(tmp_path, 1, "Research_Verifier", "structured")
+    request = json.loads((call_dir / "request.json").read_text())
+    assert request["stage"] == "Research Verifier"
+    assert request["llm_role"] == "review"
+    assert request["call_identity"] == "review_1"
+    assert request["generation_params"]["seed"] == derive_call_seed(
+        12345, "NVDA", "Research Verifier", "structured:review_1"
+    )
+
+
+@pytest.mark.unit
+def test_trace_llm_role_and_call_identity_are_none_when_not_passed(tmp_path):
+    """A call that doesn't go through a role-aware helper (e.g. Reflection's
+    raw .invoke()) must not silently invent a role."""
+    tracer = LLMTraceCallbackHandler(tmp_path / "debug")
+    traced_node("Trader", lambda state: _fake_llm_call(tracer))(None)
+    call_dir = _call_dir(tmp_path, 1, "Trader")
+    request = json.loads((call_dir / "request.json").read_text())
+    assert request["llm_role"] is None
+    assert request["call_identity"] is None
+
+
+# --- best-effort deterministic replay: traced_invoke seed propagation -------
+
+
+class _RecordingLLM:
+    """A fake LLM that records whatever kwargs .invoke() was called with,
+    without making a real call -- enough to verify traced_invoke's seed
+    propagation without any provider/network dependency."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def invoke(self, prompt, **kwargs):
+        self.calls.append(kwargs)
+        return "result"
+
+
+@pytest.mark.unit
+def test_seed_is_forwarded_when_provider_supports_it():
+    llm = _RecordingLLM()
+    set_active_seed_context(SeedContext(base_seed=12345, ticker="NVDA", provider_supports_seed=True))
+    traced_node("Bull Researcher", lambda state: traced_invoke(llm, "prompt", call_identity="initial"))(None)
+    assert llm.calls == [
+        {"seed": derive_call_seed(12345, "NVDA", "Bull Researcher", "normal:initial")}
+    ]
+
+
+@pytest.mark.unit
+def test_no_seed_context_means_no_seed_kwarg():
+    llm = _RecordingLLM()
+    traced_invoke(llm, "prompt", call_identity="initial")
+    assert llm.calls == [{}]
+
+
+@pytest.mark.unit
+def test_unsupported_provider_receives_no_seed_kwarg():
+    """A provider without verified seed support must never receive an
+    unrecognized kwarg -- the run keeps working exactly as before."""
+    llm = _RecordingLLM()
+    set_active_seed_context(SeedContext(base_seed=12345, ticker="NVDA", provider_supports_seed=False))
+    traced_invoke(llm, "prompt", call_identity="initial")
+    assert llm.calls == [{}]
+
+
+@pytest.mark.unit
+def test_structured_and_fallback_get_distinct_seeds():
+    """A structured attempt and its free-text fallback are logically
+    different calls and must not silently share a seed."""
+    llm = _RecordingLLM()
+    set_active_seed_context(SeedContext(base_seed=12345, ticker="NVDA", provider_supports_seed=True))
+
+    def node(state):
+        traced_invoke(llm, "prompt", attempt="structured", call_identity="pass_1")
+        traced_invoke(llm, "prompt", attempt="verifier_json_fallback", call_identity="pass_1")
+
+    traced_node("Research Verifier", node)(None)
+    structured_seed = llm.calls[0]["seed"]
+    fallback_seed = llm.calls[1]["seed"]
+    assert structured_seed != fallback_seed
+
+
+@pytest.mark.unit
+def test_review_round_1_and_round_2_get_distinct_seeds():
+    llm = _RecordingLLM()
+    set_active_seed_context(SeedContext(base_seed=12345, ticker="NVDA", provider_supports_seed=True))
+
+    def node(state):
+        traced_invoke(llm, "prompt", call_identity="review_1")
+        traced_invoke(llm, "prompt", call_identity="review_2")
+
+    traced_node("Bull Researcher", node)(None)
+    assert llm.calls[0]["seed"] != llm.calls[1]["seed"]
+
+
+@pytest.mark.unit
+def test_call_identity_falls_back_to_attempt_when_omitted():
+    llm = _RecordingLLM()
+    set_active_seed_context(SeedContext(base_seed=12345, ticker="NVDA", provider_supports_seed=True))
+    traced_node("Trader", lambda state: traced_invoke(llm, "prompt", attempt="trader"))(None)
+    assert llm.calls == [{"seed": derive_call_seed(12345, "NVDA", "Trader", "trader")}]
+
+
+# --- manifest: configured/base seed recorded --------------------------------
+
+
+@pytest.mark.unit
+def test_manifest_records_configured_and_base_seed(tmp_path):
+    write_run_manifest(
+        tmp_path / "debug",
+        ticker="NVDA", analysis_date="2026-09-30", depth=3,
+        analysts=["market"], language="English",
+        provider="ollama", effective_deep_model="m", effective_quick_model="m",
+        config={}, prompt_hashes={}, on_warn=lambda p, e: None,
+        configured_seed=0, base_seed=184736291, seed_provider_supported=True,
+    )
+    manifest = json.loads((tmp_path / "debug" / "run_manifest.json").read_text())
+    assert manifest["configured_seed"] == 0
+    assert manifest["base_seed"] == 184736291
+    assert manifest["seed_provider_supported"] is True
+
+
+@pytest.mark.unit
+def test_manifest_records_configured_quick_and_deep_reasoning_effort(tmp_path):
+    write_run_manifest(
+        tmp_path / "debug",
+        ticker="NVDA", analysis_date="2026-09-30", depth=3,
+        analysts=["market"], language="English",
+        provider="ollama", effective_deep_model="m", effective_quick_model="m",
+        config={"quick_reasoning_effort": "low", "deep_reasoning_effort": "max"},
+        prompt_hashes={}, on_warn=lambda p, e: None,
+    )
+    manifest = json.loads((tmp_path / "debug" / "run_manifest.json").read_text())
+    assert manifest["quick_reasoning_effort"] == "low"
+    assert manifest["deep_reasoning_effort"] == "max"
+
+
+@pytest.mark.unit
+def test_manifest_registers_canonical_generation_review_names(tmp_path):
+    """Canonical names must be present in the manifest (see fork README:
+    "Model roles: Generation vs Review"), alongside the legacy
+    effective_deep_model/effective_quick_model/quick_*/deep_* fields kept for
+    any existing manifest consumer."""
+    write_run_manifest(
+        tmp_path / "debug",
+        ticker="NVDA", analysis_date="2026-09-30", depth=3,
+        analysts=["market"], language="English",
+        provider="ollama", effective_deep_model="review-model", effective_quick_model="gen-model",
+        config={
+            "generation_llm": "gen-model", "review_llm": "review-model",
+            "generation_reasoning_effort": "low", "review_reasoning_effort": "max",
+        },
+        prompt_hashes={}, on_warn=lambda p, e: None,
+    )
+    manifest = json.loads((tmp_path / "debug" / "run_manifest.json").read_text())
+    assert manifest["generation_model"] == "gen-model"
+    assert manifest["review_model"] == "review-model"
+    assert manifest["generation_reasoning_effort"] == "low"
+    assert manifest["review_reasoning_effort"] == "max"
+    # Legacy fields still present, unchanged.
+    assert manifest["effective_deep_model"] == "review-model"
+    assert manifest["effective_quick_model"] == "gen-model"
+
+
+@pytest.mark.unit
+def test_write_summary_registers_canonical_and_legacy_model_names(tmp_path):
+    tracer = LLMTraceCallbackHandler(tmp_path / "debug")
+    tracer.write_summary(
+        stats={"llm_calls": 1}, elapsed_seconds=1.0,
+        generation_model="gen-model", review_model="review-model",
+    )
+    summary = json.loads((tmp_path / "debug" / "trace_summary.json").read_text())
+    assert summary["generation_model"] == "gen-model"
+    assert summary["review_model"] == "review-model"
+    assert summary["quick_model"] == "gen-model"
+    assert summary["deep_model"] == "review-model"
+
+
+@pytest.mark.unit
+def test_manifest_reasoning_effort_is_none_when_not_configured(tmp_path):
+    """None, not a guessed effective default -- the manifest must never
+    invent what the backend/model's own default actually was."""
+    write_run_manifest(
+        tmp_path / "debug",
+        ticker="NVDA", analysis_date="2026-09-30", depth=3,
+        analysts=["market"], language="English",
+        provider="ollama", effective_deep_model="m", effective_quick_model="m",
+        config={}, prompt_hashes={}, on_warn=lambda p, e: None,
+    )
+    manifest = json.loads((tmp_path / "debug" / "run_manifest.json").read_text())
+    assert manifest["quick_reasoning_effort"] is None
+    assert manifest["deep_reasoning_effort"] is None
 
 
 @pytest.mark.unit

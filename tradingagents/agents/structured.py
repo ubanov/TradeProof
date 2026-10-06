@@ -66,6 +66,9 @@ def invoke_structured_or_freetext(
     prompt: Any,
     render: Callable[[T], str],
     agent_name: str,
+    *,
+    call_identity: str | None = None,
+    llm_role: str | None = None,
 ) -> str:
     """Run the structured call and render to markdown; fall back to free-text on any failure.
 
@@ -73,10 +76,19 @@ def invoke_structured_or_freetext(
     invocations, a list of message dicts for chat models that take that
     shape). The same value is forwarded to the free-text path so the
     fallback sees the same input the structured call did.
+
+    ``call_identity`` is forwarded to ``traced_invoke`` for best-effort
+    deterministic replay (see ``tradingagents/run_seed.py``); callers that
+    don't need to distinguish repeated calls at this same stage can omit it.
+    ``llm_role`` ("generation"/"review", see fork README: "Model roles:
+    Generation vs Review") is forwarded the same way, for trace observability.
     """
     if structured_llm is not None:
         try:
-            result = traced_invoke(structured_llm, prompt, attempt="structured")
+            result = traced_invoke(
+                structured_llm, prompt, attempt="structured",
+                call_identity=call_identity, llm_role=llm_role,
+            )
             if result is None:
                 # A thinking model can answer in plain text instead of calling
                 # the tool, leaving the parser with nothing to return. Treat it
@@ -96,5 +108,7 @@ def invoke_structured_or_freetext(
                 detail=str(exc),
             )
 
-    response = traced_invoke(plain_llm, prompt, attempt="fallback")
+    response = traced_invoke(
+        plain_llm, prompt, attempt="fallback", call_identity=call_identity, llm_role=llm_role,
+    )
     return response.content

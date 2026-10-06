@@ -10,8 +10,17 @@ def _initial_or_absent(risk_debate_state: dict, key: str) -> str:
     return risk_debate_state.get(key) or "(no independent assessment recorded)"
 
 
-def create_aggressive_debator(llm):
-    structured_llm = bind_structured(llm, RiskStanceAssessment, "Aggressive Analyst")
+def create_aggressive_debator(generation_llm, review_llm):
+    """Independent initial assessment is a generation operation; the
+    cross-review round is a review operation (challenges the other two
+    reviewers' assessments) -- see fork README: "Model roles: Generation vs
+    Review"."""
+    structured_generation_llm = bind_structured(
+        generation_llm, RiskStanceAssessment, "Aggressive Analyst (initial)"
+    )
+    structured_review_llm = bind_structured(
+        review_llm, RiskStanceAssessment, "Aggressive Analyst (review)"
+    )
 
     def aggressive_node(state) -> dict:
         risk_debate_state = state["risk_debate_state"]
@@ -38,8 +47,13 @@ def create_aggressive_debator(llm):
                 neutral_initial=_initial_or_absent(risk_debate_state, "neutral_initial"),
             ) + get_language_instruction()
 
+        llm_for_call = generation_llm if is_initial else review_llm
+        structured_for_call = structured_generation_llm if is_initial else structured_review_llm
+
         rendered, risk_level, disposition, assessment = invoke_risk_assessment(
-            structured_llm, llm, prompt, "Aggressive Analyst"
+            structured_for_call, llm_for_call, prompt, "Aggressive Analyst",
+            call_identity="initial" if is_initial else "review",
+            llm_role="generation" if is_initial else "review",
         )
 
         label = "Independent Assessment" if is_initial else "Cross-Review"

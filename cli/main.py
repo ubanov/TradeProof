@@ -19,6 +19,7 @@ from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.portfolio import load_portfolio
+from tradingagents.run_seed import resolve_base_seed, validate_configured_seed
 
 # Batch defaults so only --tickers/--tickers-file is required: each is an
 # explicit flag, then an env var, then a hardcoded fallback -- in that order.
@@ -109,14 +110,49 @@ def run_non_interactive(
     output_dir: Path = typer.Option(  # noqa: B008 - Typer option declaration
         ..., "--output-dir", help="Directory for the report and result.json"
     ),
+    generation_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_GENERATION_LLM", "--generation-llm",
+        help="Override the generation-role model for this run only (see "
+        "README: 'Model roles: Generation vs Review'). With no --review-llm "
+        "override, the whole run uses this model (review inherits it too).",
+    ),
+    review_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_REVIEW_LLM", "--review-llm",
+        help="Override the review-role model for this run only.",
+    ),
     deep_think_llm: str | None = typer.Option(
         None, "--TRADINGAGENTS_DEEP_THINK_LLM", "--deep-think-llm",
-        help="Override the deep-thinking model for this run only. With no quick "
-        "override, the whole run uses this model (quick inherits it too).",
+        help="Deprecated alias for --review-llm (see README: 'Legacy "
+        "naming'); an explicit --review-llm wins if both are given.",
     ),
     quick_think_llm: str | None = typer.Option(
         None, "--TRADINGAGENTS_QUICK_THINK_LLM", "--quick-think-llm",
-        help="Override the quick-thinking model for this run only.",
+        help="Deprecated alias for --generation-llm (see README: 'Legacy "
+        "naming'); an explicit --generation-llm wins if both are given.",
+    ),
+    generation_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_GENERATION_REASONING_EFFORT", "--generation-reasoning-effort",
+        help="Reasoning effort for the generation-role model (see README: "
+        "'Model roles: Generation vs Review'). Valid levels are model/backend-"
+        "specific (e.g. low/medium/high, or false/low/high/max) -- not "
+        "validated here. Unset sends no override, so the backend/model's own "
+        "default applies.",
+    ),
+    review_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_REVIEW_REASONING_EFFORT", "--review-reasoning-effort",
+        help="Reasoning effort for the review-role model, independent of "
+        "--generation-reasoning-effort. See README: 'Model roles: Generation "
+        "vs Review'.",
+    ),
+    quick_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_QUICK_REASONING_EFFORT", "--quick-reasoning-effort",
+        help="Deprecated alias for --generation-reasoning-effort (see "
+        "README: 'Legacy naming').",
+    ),
+    deep_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_DEEP_REASONING_EFFORT", "--deep-reasoning-effort",
+        help="Deprecated alias for --review-reasoning-effort (see README: "
+        "'Legacy naming').",
     ),
     trace_llm: bool = typer.Option(
         False, "--trace-llm",
@@ -124,12 +160,25 @@ def run_non_interactive(
         "prompts, raw/parsed responses, timing, tokens) under <output-dir>/debug/. "
         "Off by default; traces are not transmitted, only written locally.",
     ),
+    seed: int | None = typer.Option(
+        None, "--TRADINGAGENTS_SEED", "--seed",
+        help="Best-effort deterministic replay base seed (see README). 0 "
+        "(the default when omitted, unless TRADINGAGENTS_SEED is set) "
+        "auto-generates a base seed and prints it; a non-zero value reuses "
+        "it, deriving a stable per-call seed per ticker/stage/call -- never "
+        "guaranteed bit-for-bit identical output.",
+    ),
 ):
     """Run one analysis without interactive prompts."""
     echo = timestamped_echo()
     try:
         _, depth_value = parse_depth(depth)
         analyst_names = parse_analysts(analysts)
+        configured_seed = validate_configured_seed(
+            seed if seed is not None else DEFAULT_CONFIG.get("seed", 0)
+        )
+        base_seed = resolve_base_seed(configured_seed)
+        echo(f"Run seed: {base_seed}")
         echo(f"Analysis date: {date}")
         result = run_single_analysis(
             ticker=ticker,
@@ -142,7 +191,15 @@ def run_non_interactive(
             progress_prefix=ticker,
             deep_think_llm=deep_think_llm,
             quick_think_llm=quick_think_llm,
+            generation_llm=generation_llm,
+            review_llm=review_llm,
+            quick_reasoning_effort=quick_reasoning_effort,
+            deep_reasoning_effort=deep_reasoning_effort,
+            generation_reasoning_effort=generation_reasoning_effort,
+            review_reasoning_effort=review_reasoning_effort,
             trace_llm=trace_llm,
+            base_seed=base_seed,
+            configured_seed=configured_seed,
         )
     except Exception as exc:
         # A setup-time failure that never reached graph execution (bad config,
@@ -211,20 +268,63 @@ def batch_non_interactive(
     output_dir: Path | None = typer.Option(  # noqa: B008 - Typer option declaration
         None, "--output-dir", help=r"Batch output directory. Defaults to .\test\<date>."
     ),
+    generation_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_GENERATION_LLM", "--generation-llm",
+        help="Override the generation-role model for this batch only (see "
+        "README: 'Model roles: Generation vs Review'). With no --review-llm "
+        "override, the whole batch uses this model (review inherits it too).",
+    ),
+    review_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_REVIEW_LLM", "--review-llm",
+        help="Override the review-role model for this batch only.",
+    ),
     deep_think_llm: str | None = typer.Option(
         None, "--TRADINGAGENTS_DEEP_THINK_LLM", "--deep-think-llm",
-        help="Override the deep-thinking model for this batch only. With no quick "
-        "override, the whole batch uses this model (quick inherits it too).",
+        help="Deprecated alias for --review-llm (see README: 'Legacy "
+        "naming'); an explicit --review-llm wins if both are given.",
     ),
     quick_think_llm: str | None = typer.Option(
         None, "--TRADINGAGENTS_QUICK_THINK_LLM", "--quick-think-llm",
-        help="Override the quick-thinking model for this batch only.",
+        help="Deprecated alias for --generation-llm (see README: 'Legacy "
+        "naming'); an explicit --generation-llm wins if both are given.",
+    ),
+    generation_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_GENERATION_REASONING_EFFORT", "--generation-reasoning-effort",
+        help="Reasoning effort for the generation-role model (see README: "
+        "'Model roles: Generation vs Review'). Valid levels are model/backend-"
+        "specific -- not validated here. Unset sends no override, so the "
+        "backend/model's own default applies.",
+    ),
+    review_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_REVIEW_REASONING_EFFORT", "--review-reasoning-effort",
+        help="Reasoning effort for the review-role model, independent of "
+        "--generation-reasoning-effort. See README: 'Model roles: Generation "
+        "vs Review'.",
+    ),
+    quick_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_QUICK_REASONING_EFFORT", "--quick-reasoning-effort",
+        help="Deprecated alias for --generation-reasoning-effort (see "
+        "README: 'Legacy naming').",
+    ),
+    deep_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_DEEP_REASONING_EFFORT", "--deep-reasoning-effort",
+        help="Deprecated alias for --review-reasoning-effort (see README: "
+        "'Legacy naming').",
     ),
     trace_llm: bool = typer.Option(
         False, "--trace-llm",
         help="Save a complete, auditable trace of every LLM call (rendered "
         "prompts, raw/parsed responses, timing, tokens) under each ticker's "
         "debug/ directory. Off by default.",
+    ),
+    seed: int | None = typer.Option(
+        None, "--TRADINGAGENTS_SEED", "--seed",
+        help="Best-effort deterministic replay base seed (see README). 0 "
+        "(the default when omitted, unless TRADINGAGENTS_SEED is set) "
+        "auto-generates ONE base seed for the whole batch and prints it; a "
+        "non-zero value reuses it. Every ticker derives its own stable "
+        "per-stage/per-call seeds from the same base seed -- never "
+        "guaranteed bit-for-bit identical output.",
     ),
 ):
     """Run multiple analyses sequentially without interactive prompts.
@@ -246,10 +346,17 @@ def batch_non_interactive(
         depth_name, depth_value = parse_depth(depth)
         analyst_names = parse_analysts(analysts)
         ticker_names = parse_tickers(tickers, tickers_file)
+        configured_seed = validate_configured_seed(
+            seed if seed is not None else DEFAULT_CONFIG.get("seed", 0)
+        )
     except (OSError, ValueError) as exc:
         echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from None
 
+    # ONE base seed for the whole batch, resolved here, before any ticker
+    # runs -- never regenerated per ticker (see run_seed.resolve_base_seed).
+    base_seed = resolve_base_seed(configured_seed)
+    echo(f"Run seed: {base_seed}")
     echo(f"Analysis date: {date}")
     echo(f"Output directory: {output_dir.resolve()}")
     try:
@@ -264,7 +371,15 @@ def batch_non_interactive(
             progress=echo,
             deep_think_llm=deep_think_llm,
             quick_think_llm=quick_think_llm,
+            generation_llm=generation_llm,
+            review_llm=review_llm,
+            quick_reasoning_effort=quick_reasoning_effort,
+            deep_reasoning_effort=deep_reasoning_effort,
+            generation_reasoning_effort=generation_reasoning_effort,
+            review_reasoning_effort=review_reasoning_effort,
             trace_llm=trace_llm,
+            base_seed=base_seed,
+            configured_seed=configured_seed,
         )
     except Exception as exc:
         echo(f"Error: {exc}", err=True)

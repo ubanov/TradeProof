@@ -116,3 +116,108 @@ def test_env_override_sets_config(monkeypatch):
     dc = _reload_with_env(monkeypatch, TRADINGAGENTS_MAX_TOKENS="8192")
     assert dc.DEFAULT_CONFIG["max_tokens"] == "8192"
     assert _coerce_max_tokens(dc.DEFAULT_CONFIG["max_tokens"]) == 8192
+
+
+# --- Ollama default max_tokens: runaway-generation safety guardrail --------
+#
+# A local Ollama model has no provider-side output cap; a real run observed a
+# single call consuming the entire context window (~131K tokens, 30+ minutes,
+# empty content / no tool call, finish_reason="length") instead of a normal
+# few-thousand-token response. Ollama alone gets a default max_tokens; every
+# other provider's behavior must stay exactly as it was.
+
+
+@pytest.mark.unit
+def test_ollama_gets_the_default_cap_when_unset():
+    from tradingagents.llm_clients.openai_client import OLLAMA_DEFAULT_MAX_TOKENS, OpenAIClient
+
+    llm = OpenAIClient(model="gemma4:26b", provider="ollama").get_llm()
+    assert OLLAMA_DEFAULT_MAX_TOKENS == 8192
+    assert llm.max_tokens == 8192
+
+
+@pytest.mark.unit
+def test_ollama_explicit_max_tokens_overrides_the_default():
+    from tradingagents.llm_clients.openai_client import OpenAIClient
+
+    llm = OpenAIClient(model="gemma4:26b", provider="ollama", max_tokens=16384).get_llm()
+    assert llm.max_tokens == 16384
+
+
+@pytest.mark.unit
+def test_ollama_default_survives_the_full_config_to_client_pipeline():
+    """End-to-end: no TRADINGAGENTS_MAX_TOKENS set -> build_llm_kwargs forwards
+    nothing (unchanged) -> OpenAIClient still applies the Ollama default."""
+    from tradingagents.llm_clients.openai_client import OLLAMA_DEFAULT_MAX_TOKENS, OpenAIClient
+
+    kwargs = build_llm_kwargs({"llm_provider": "ollama", "max_tokens": None})
+    assert "max_tokens" not in kwargs  # build_llm_kwargs itself is unchanged
+
+    llm = OpenAIClient(model="gemma4:26b", provider="ollama", **kwargs).get_llm()
+    assert llm.max_tokens == OLLAMA_DEFAULT_MAX_TOKENS
+
+
+@pytest.mark.unit
+def test_ollama_env_override_wins_over_the_default_end_to_end():
+    """TRADINGAGENTS_MAX_TOKENS=16384 flows through build_llm_kwargs and still
+    overrides the Ollama default once it reaches the client."""
+    from tradingagents.llm_clients.openai_client import OpenAIClient
+
+    kwargs = build_llm_kwargs({"llm_provider": "ollama", "max_tokens": "16384"})
+    llm = OpenAIClient(model="gemma4:26b", provider="ollama", **kwargs).get_llm()
+    assert llm.max_tokens == 16384
+
+
+@pytest.mark.unit
+def test_openai_does_not_get_a_default_max_tokens():
+    from tradingagents.llm_clients.openai_client import OpenAIClient
+
+    llm = OpenAIClient(model="gpt-4.1", provider="openai", api_key="x").get_llm()
+    assert llm.max_tokens is None
+
+
+@pytest.mark.unit
+def test_generic_openai_compatible_local_server_does_not_inherit_the_ollama_default():
+    """The generic 'openai_compatible' provider (LM Studio, vLLM, llama.cpp)
+    must not silently receive Ollama's guardrail -- only "ollama" declares it."""
+    from tradingagents.llm_clients.openai_client import OpenAIClient
+
+    llm = OpenAIClient(
+        model="local-model", provider="openai_compatible", base_url="http://localhost:1234/v1"
+    ).get_llm()
+    assert llm.max_tokens is None
+
+
+@pytest.mark.unit
+def test_azure_is_a_structurally_separate_client_unaffected_by_the_ollama_default(monkeypatch):
+    """Azure has its own client/kwargs allowlist entirely outside
+    OpenAIClient/OPENAI_COMPATIBLE_PROVIDERS, so the Ollama default cannot
+    reach it even in principle."""
+    from tradingagents.llm_clients.azure_client import AzureOpenAIClient
+
+    monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT_NAME", raising=False)
+    monkeypatch.setenv("OPENAI_API_VERSION", "2025-03-01-preview")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/")
+    llm = AzureOpenAIClient("gpt-4.1", api_key="test-key").get_llm()
+    assert getattr(llm, "max_tokens", None) is None
+
+
+@pytest.mark.unit
+def test_invalid_explicit_max_tokens_for_ollama_still_fails_loudly():
+    """An invalid user-set value must still raise before ever reaching the
+    Ollama-default logic -- the default must never paper over bad input."""
+    with pytest.raises(ValueError):
+        build_llm_kwargs({"llm_provider": "ollama", "max_tokens": 0})
+
+
+@pytest.mark.unit
+def test_ollama_default_does_not_change_base_url_or_context_length(monkeypatch):
+    """The guardrail is only an output-token cap -- base_url resolution (and
+    therefore num_ctx, which lives server-side in Ollama, untouched by this
+    client) must be completely unaffected."""
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    from tradingagents.llm_clients.openai_client import OpenAIClient
+
+    llm = OpenAIClient(model="gemma4:26b", provider="ollama").get_llm()
+    assert str(llm.openai_api_base) == "http://localhost:11434/v1"
+    assert llm.max_tokens == 8192

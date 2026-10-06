@@ -27,6 +27,7 @@ def _execution(trader_plan, research_plan="", final_decision="", rating="REVIEW"
         duration_seconds=1.0,
         stats={"llm_calls": 1, "tool_calls": 0, "tokens_in": 1, "tokens_out": 1},
         fallback_warnings=0,
+        base_seed=None,
     )
 
 

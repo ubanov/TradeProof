@@ -40,15 +40,16 @@ def _seven_days_back(trade_date: str) -> str:
     return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
 
-def create_sentiment_analyst(llm):
+def create_sentiment_analyst(generation_llm):
     """Create a sentiment analyst node for the trading graph.
 
     Pre-fetches news + StockTwits + Reddit data, injects them into the
     prompt as structured blocks, and produces a deterministic sentiment
     report via structured output (with a free-text fallback for providers
-    that do not support it).
+    that do not support it). A generation operation (see fork README:
+    "Model roles: Generation vs Review").
     """
-    structured_llm = bind_structured(llm, SentimentReport, "Sentiment Analyst")
+    structured_llm = bind_structured(generation_llm, SentimentReport, "Sentiment Analyst")
 
     def sentiment_analyst_node(state):
         ticker = state["company_of_interest"]
@@ -99,10 +100,12 @@ def create_sentiment_analyst(llm):
 
         report_text = invoke_structured_or_freetext(
             structured_llm,
-            llm,
+            generation_llm,
             formatted_messages,
             render_sentiment_report,
             "Sentiment Analyst",
+            call_identity="sentiment_analyst",
+            llm_role="generation",
         )
 
         return {

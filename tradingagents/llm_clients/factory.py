@@ -87,8 +87,33 @@ def _coerce_max_tokens(value):
     return n
 
 
-def build_llm_kwargs(config: dict) -> dict[str, Any]:
-    """Keyword arguments for ``create_llm_client`` from a TradingAgents config."""
+def _coerce_reasoning_effort(value) -> str:
+    """Validate a reasoning-effort value: format only, never a fixed level
+    list -- valid levels are model/backend-specific (Qwen3.8 Flash Next:
+    false/low/medium/xhigh; DeepSeek V4 Pro: false/low/high/max; ...). The
+    backend/model is the final authority on whether a given level is valid;
+    this only rejects a non-string or empty/whitespace value before it ever
+    reaches a provider (see fork README: "Quick vs Deep reasoning effort")."""
+    if isinstance(value, bool):
+        raise ValueError(f"reasoning_effort must be a string, not a boolean: {value!r}")
+    if not isinstance(value, str):
+        raise ValueError(f"reasoning_effort must be a string, got {value!r}")
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("reasoning_effort must not be empty")
+    return stripped
+
+
+def build_llm_kwargs(config: dict, role: str | None = None) -> dict[str, Any]:
+    """Keyword arguments for ``create_llm_client`` from a TradingAgents config.
+
+    ``role`` is ``"quick"`` or ``"deep"`` when the caller is building kwargs
+    for that specific role's client (see ``TradingAgentsGraph.__init__``,
+    which calls this once per role so each can carry its own independently
+    configured reasoning effort -- ``quick_reasoning_effort`` /
+    ``deep_reasoning_effort``). Omitting it (``None``) preserves this
+    function's original role-agnostic behavior for any other caller/test.
+    """
     kwargs = {}
     provider = config.get("llm_provider", "").lower()
 
@@ -98,14 +123,30 @@ def build_llm_kwargs(config: dict) -> dict[str, Any]:
             kwargs["thinking_level"] = thinking_level
 
     elif provider == "openai":
-        reasoning_effort = config.get("openai_reasoning_effort")
+        # A per-role override (new) takes precedence over the single legacy
+        # global knob (old), which keeps working unchanged for any caller
+        # that only ever set that one -- see fork README: "Quick vs Deep
+        # reasoning effort".
+        reasoning_effort = (
+            (config.get(f"{role}_reasoning_effort") if role else None)
+            or config.get("openai_reasoning_effort")
+        )
         if reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["reasoning_effort"] = _coerce_reasoning_effort(reasoning_effort)
 
     elif provider == "anthropic":
         effort = config.get("anthropic_effort")
         if effort:
             kwargs["effort"] = effort
+
+    elif provider == "ollama" and role:
+        # Ollama's OpenAI-compatible endpoint accepts `reasoning_effort` (it
+        # maps internally to its native `think` parameter) -- deliberately
+        # scoped to "ollama" only, not every OpenAI-compatible provider, since
+        # support elsewhere (xai, deepseek, qwen, groq, ...) is unverified.
+        reasoning_effort = config.get(f"{role}_reasoning_effort")
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = _coerce_reasoning_effort(reasoning_effort)
 
     # Sampling temperature is cross-provider: forward it whenever set.
     # float() here so a value coming from a TRADINGAGENTS_TEMPERATURE env

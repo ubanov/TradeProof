@@ -181,3 +181,53 @@ def test_manager_volume_requirement_without_if_when_still_warns():
     manager_text = "The plan requires volume to exceed 120M before entering."
     result = check_manager_integrity(manager_text, _debate(), "", "", "", "")
     assert result.status == "WARN"
+
+
+# --- D: a header/bullet block glued by bare "\n" must not cascade false
+#        positives (real qwen3.8-flash-next/XOM run: the same
+#        NEW_UNSUPPORTED_THRESHOLD finding repeated 8 times) ----------------
+
+
+@pytest.mark.unit
+def test_disposition_header_glued_to_an_unrelated_bullet_is_not_flagged():
+    """``render_risk_assessment`` (schemas.py) joins "Risk level: HIGH",
+    "Disposition: REDUCE_RISK", "Supported points:", and each bullet with a
+    single "\n" -- never trailing whitespace. The previous sentence splitter
+    only split after ".!?;", so this whole block stayed one giant "sentence"
+    and "REDUCE_RISK" alone (matching the "reduce" threshold trigger) caused
+    an unrelated number in a later bullet -- with no threshold language of
+    its own -- to be flagged as a new, unsupported operational threshold.
+    """
+    state = _risk_state()
+    text = (
+        "Aggressive Reviewer (Cross-Review): Risk level: HIGH\n"
+        "Disposition: REDUCE_RISK\n"
+        "Supported points:\n"
+        "- WTI oil reference moved to 96.16 dollars per barrel this quarter."
+    )
+    result = check_risk_integrity(text, state)
+    assert result.status == "PASS"
+
+
+@pytest.mark.unit
+def test_header_bullet_block_does_not_produce_duplicate_looking_findings():
+    """The real regression: once glued into one "sentence", every unrelated
+    number anywhere in the block generated its own finding, all sharing the
+    same (truncated) excerpt -- indistinguishable duplicates in the report.
+    Splitting on every bare newline keeps each bullet independent, so a
+    genuine new threshold in one bullet is reported once, not once per
+    unrelated number elsewhere in the same block.
+    """
+    state = _risk_state()
+    text = (
+        "Aggressive Reviewer (Cross-Review): Risk level: HIGH\n"
+        "Disposition: REDUCE_RISK\n"
+        "Supported points:\n"
+        "- WTI oil reference moved to 96.16 dollars per barrel this quarter.\n"
+        "- Only proceed if the 10Y yield exceeds 5.50%, a level not seen in the evidence."
+    )
+    result = check_risk_integrity(text, state)
+    assert result.status == "WARN"
+    assert len(result.findings) == 1
+    assert "5.50" in result.findings[0].detail
+    assert "96.16" not in result.findings[0].detail

@@ -17,12 +17,14 @@ from tradingagents.prompts.loader import render_agent_prompt
 from .review_outcomes import merge_review_outcomes, review_guidance
 
 
-def create_bear_researcher(llm):
+def create_bear_researcher(generation_llm, review_llm):
+    """See ``create_bull_researcher``'s docstring -- identical split, mirror
+    side: initial thesis is generation, each review round is review."""
     structured_initial_llm = bind_structured(
-        llm, InitialResearchThesis, "Bear Researcher (initial)"
+        generation_llm, InitialResearchThesis, "Bear Researcher (initial)"
     )
     structured_review_llm = bind_structured(
-        llm, ResearchReviewOutcome, "Bear Researcher (review)"
+        review_llm, ResearchReviewOutcome, "Bear Researcher (review)"
     )
 
     def bear_node(state) -> dict:
@@ -67,7 +69,8 @@ def create_bear_researcher(llm):
             prompt += get_language_instruction()
 
             rendered, thesis_dict, initial_recovery_status = invoke_initial_thesis(
-                structured_initial_llm, llm, prompt, "Bear Researcher"
+                structured_initial_llm, generation_llm, prompt, "Bear Researcher",
+                call_identity="initial", llm_role="generation",
             )
             argument = f"Bear Analyst (Initial): {rendered}"
 
@@ -125,10 +128,12 @@ def create_bear_researcher(llm):
 
             rendered, review_dict, review_recovery_status = invoke_review(
                 structured_review_llm,
-                llm,
+                review_llm,
                 prompt,
                 "Bear Researcher",
                 prior_thesis=investment_debate_state.get("bear_thesis"),
+                call_identity=f"review_{review_round}",
+                llm_role="review",
             )
             argument = f"Bear Analyst (Review {review_round}): {rendered}"
 

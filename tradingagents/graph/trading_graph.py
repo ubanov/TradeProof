@@ -13,7 +13,7 @@ from tradingagents.dataflows.config import run_config, set_config
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.decision_log import TradingMemoryLog
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import DEFAULT_CONFIG, resolve_role_config
 from tradingagents.llm_clients import build_llm_kwargs, create_llm_client
 from tradingagents.reporting import write_report_tree
 
@@ -68,26 +68,47 @@ class TradingAgentsGraph:
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
 
-        llm_kwargs = build_llm_kwargs(self.config)
+        # The single compatibility layer (see fork README: "Legacy naming"):
+        # fills in generation_llm/review_llm/*_reasoning_effort from legacy
+        # quick/deep config when the caller only set those, so ANY config
+        # dict works here -- CLI-built, DEFAULT_CONFIG, or a bare dict a
+        # programmatic caller constructed directly. Idempotent and safe to
+        # call even when the config was already resolved upstream.
+        self.config = resolve_role_config(self.config)
+
+        # Built once per role (not shared) so each can carry its own
+        # independently configured reasoning effort -- generation_reasoning_
+        # effort / review_reasoning_effort (see fork README: "Model roles:
+        # Generation vs Review"). Every other kwarg (temperature, max_tokens,
+        # ...) still resolves identically for both, since build_llm_kwargs
+        # only branches on ``role`` for the reasoning-effort lookup.
+        generation_llm_kwargs = build_llm_kwargs(self.config, role="generation")
+        review_llm_kwargs = build_llm_kwargs(self.config, role="review")
 
         if self.callbacks:
-            llm_kwargs["callbacks"] = self.callbacks
+            generation_llm_kwargs["callbacks"] = self.callbacks
+            review_llm_kwargs["callbacks"] = self.callbacks
 
-        deep_client = create_llm_client(
+        generation_client = create_llm_client(
             provider=self.config["llm_provider"],
-            model=self.config["deep_think_llm"],
+            model=self.config["generation_llm"],
             base_url=self.config.get("backend_url"),
-            **llm_kwargs,
+            **generation_llm_kwargs,
         )
-        quick_client = create_llm_client(
+        review_client = create_llm_client(
             provider=self.config["llm_provider"],
-            model=self.config["quick_think_llm"],
+            model=self.config["review_llm"],
             base_url=self.config.get("backend_url"),
-            **llm_kwargs,
+            **review_llm_kwargs,
         )
 
-        self.deep_thinking_llm = deep_client.get_llm()
-        self.quick_thinking_llm = quick_client.get_llm()
+        self.generation_llm = generation_client.get_llm()
+        self.review_llm = review_client.get_llm()
+        # Legacy attribute names (deprecated, see fork README "Legacy
+        # naming"): quick -> generation, deep -> review. Kept as aliases to
+        # the same objects for any external/internal reader not yet migrated.
+        self.quick_thinking_llm = self.generation_llm
+        self.deep_thinking_llm = self.review_llm
 
         self.memory_log = TradingMemoryLog(self.config)
 
@@ -96,15 +117,18 @@ class TradingAgentsGraph:
             max_risk_discuss_rounds=self.config["max_risk_discuss_rounds"],
         )
         self.graph_setup = GraphSetup(
-            self.quick_thinking_llm,
-            self.deep_thinking_llm,
+            self.generation_llm,
+            self.review_llm,
             self.conditional_logic,
         )
 
         self.propagator = Propagator(
             max_recur_limit=self.config.get("max_recur_limit", 100),
         )
-        self.reflector = Reflector(self.quick_thinking_llm)
+        # Reflection writes a reflective summary of a past decision's
+        # outcome -- a synthesis/generation function, not an adversarial
+        # review of it.
+        self.reflector = Reflector(self.generation_llm)
 
         # Graph-shape-affecting run choices, kept for the checkpoint signature.
         self.selected_analysts = tuple(selected_analysts)

@@ -142,7 +142,8 @@ def test_structured_initial_success_sets_recovery_status_not_needed():
             )
 
     state = _state()
-    _apply(state, create_bull_researcher(_StructuredLLM()))
+    llm = _StructuredLLM()
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
     assert debate["bull_thesis"]["conviction"]["total"] == 75
     assert debate["bull_initial_recovery_status"] == "NOT_NEEDED"
@@ -164,7 +165,7 @@ def test_initial_fallback_with_successful_recovery_creates_canonical_thesis():
     )
     llm = _FallbackLLM(fallback_text, recovery_json)
     state = _state()
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_initial_recovery_status"] == "APPLIED"
@@ -185,7 +186,7 @@ def test_initial_fallback_with_failed_recovery_leaves_canonical_unavailable():
     fallback_text = "Bullish overall, high conviction, but details to follow."
     llm = _FallbackLLM(fallback_text, recovery_json=None)
     state = _state()
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_initial_recovery_status"] == "UNAPPLIED"
@@ -220,7 +221,8 @@ def test_structured_review_success_sets_recovery_status_not_needed():
             )
 
     state, _ = _state_with_thesis()
-    _apply(state, create_bull_researcher(_StructuredLLM()))
+    llm = _StructuredLLM()
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
     assert debate["bull_review_recovery_status"] == "NOT_NEEDED"
     assert debate["bull_conviction_history"] == [75, 70]
@@ -243,7 +245,7 @@ def test_successive_review_fallback_recoveries_never_revert_to_an_earlier_convic
         '{"entry": {"action": "KEEP"}, "take_profit": {"action": "KEEP"}, '
         '"stop_loss": {"action": "KEEP"}}}',
     )
-    _apply(state, create_bull_researcher(round1_llm))
+    _apply(state, create_bull_researcher(round1_llm, round1_llm))
     debate = state["investment_debate_state"]
     assert debate["bull_review_recovery_status"] == "APPLIED"
     assert debate["bull_conviction_history"] == [57, 52]
@@ -254,7 +256,7 @@ def test_successive_review_fallback_recoveries_never_revert_to_an_earlier_convic
         '{"entry": {"action": "KEEP"}, "take_profit": {"action": "KEEP"}, '
         '"stop_loss": {"action": "KEEP"}}}',
     )
-    _apply(state, create_bull_researcher(round2_llm))
+    _apply(state, create_bull_researcher(round2_llm, round2_llm))
     debate = state["investment_debate_state"]
     assert debate["bull_review_recovery_status"] == "APPLIED"
     assert debate["bull_conviction_history"] == [57, 52, 50]
@@ -282,7 +284,7 @@ def test_review_fallback_recovery_applies_trade_plan_patch_exactly():
         '"stop_loss": {"action": "REVISE", "new": 85}}}'
     )
     llm = _FallbackLLM(fallback_text, recovery_json)
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_review_recovery_status"] == "APPLIED"
@@ -302,7 +304,7 @@ def test_review_fallback_with_failed_recovery_leaves_canonical_unchanged():
 
     fallback_text = "I'm adjusting my view somewhat based on the bear's points."
     llm = _FallbackLLM(fallback_text, recovery_json=None)
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_review_recovery_status"] == "UNAPPLIED"
@@ -331,7 +333,7 @@ def test_review_recovery_is_rejected_when_it_introduces_a_value_not_in_the_text(
         '"stop_loss": {"action": "REVISE", "new": 123456}}}'
     )
     llm = _FallbackLLM(fallback_text, recovery_json)
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_review_recovery_status"] == "UNAPPLIED"
@@ -388,7 +390,7 @@ def test_regression_failed_review_recovery_keeps_research_context_at_prior_convi
 
     fallback_text = "Lowering conviction to 50 given the bear's challenge."
     llm = _FallbackLLM(fallback_text, recovery_json=None)
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_review_recovery_status"] == "UNAPPLIED"
@@ -418,7 +420,7 @@ def test_initial_recovery_with_explicit_risk_unit_label_sets_canonical_medium():
     )
     llm = _FallbackLLM(fallback_text, recovery_json)
     state = _state()
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_initial_recovery_status"] == "APPLIED"
@@ -442,7 +444,7 @@ def test_initial_recovery_with_qualitative_conviction_and_no_explicit_risk_unit(
     )
     llm = _FallbackLLM(fallback_text, recovery_json)
     state = _state()
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_initial_recovery_status"] == "APPLIED"
@@ -471,7 +473,7 @@ def test_xom_regression_high_conviction_fallback_does_not_invent_high_risk_unit(
     )
     llm = _FallbackLLM(fallback_text, recovery_json)
     state = _state()
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_initial_recovery_status"] == "APPLIED"
@@ -501,7 +503,7 @@ def test_initial_recovery_ambiguous_high_risk_wording_is_not_inferred_as_risk_un
     )
     llm = _FallbackLLM(fallback_text, recovery_json)
     state = _state()
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_initial_recovery_status"] == "APPLIED"
@@ -524,7 +526,7 @@ def test_initial_recovery_with_invalid_risk_unit_is_rejected():
     )
     llm = _FallbackLLM(fallback_text, recovery_json)
     state = _state()
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_initial_recovery_status"] == "UNAPPLIED"
@@ -558,7 +560,8 @@ def test_structured_initial_happy_path_suggested_risk_unit_still_derived_not_cho
             )
 
     state = _state()
-    _apply(state, create_bull_researcher(_StructuredLLM()))
+    llm = _StructuredLLM()
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
     assert debate["bull_initial_recovery_status"] == "NOT_NEEDED"
     assert debate["bull_thesis"]["suggested_risk_unit"] == "MEDIUM"
@@ -587,7 +590,7 @@ def test_acceptance_a_failed_review_recovery_hides_semantic_content_from_researc
 
     fallback_text = "Lowering conviction to 50, also raising take profit to 240 given momentum."
     llm = _FallbackLLM(fallback_text, recovery_json=None)  # recovery fails
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_review_recovery_status"] == "UNAPPLIED"
@@ -628,7 +631,7 @@ def test_acceptance_b_successful_review_recovery_keeps_narrative_visible_downstr
         '"stop_loss": {"action": "KEEP"}}}'
     )
     llm = _FallbackLLM(fallback_text, recovery_json)
-    _apply(state, create_bull_researcher(llm))
+    _apply(state, create_bull_researcher(llm, llm))
     debate = state["investment_debate_state"]
 
     assert debate["bull_review_recovery_status"] == "APPLIED"

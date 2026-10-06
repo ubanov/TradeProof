@@ -24,7 +24,11 @@ from cli.run import (
 from cli.stats_handler import StatsCallbackHandler
 from tradingagents.agents.rating import RATINGS_5_TIER, extract_choice, is_review
 from tradingagents.dataflows.symbols import safe_ticker_component
-from tradingagents.default_config import DEFAULT_CONFIG, resolve_effective_models
+from tradingagents.default_config import (
+    DEFAULT_CONFIG,
+    resolve_effective_roles,
+    resolve_role_config,
+)
 from tradingagents.graph.conditional_logic import RISK_ANALYSIS_TOTAL_TURNS
 from tradingagents.graph.trading_graph import _validate_trade_date
 
@@ -96,16 +100,53 @@ def build_headless_config(
     *,
     cli_deep_think_llm: str | None = None,
     cli_quick_think_llm: str | None = None,
+    cli_generation_llm: str | None = None,
+    cli_review_llm: str | None = None,
+    cli_quick_reasoning_effort: str | None = None,
+    cli_deep_reasoning_effort: str | None = None,
+    cli_generation_reasoning_effort: str | None = None,
+    cli_review_reasoning_effort: str | None = None,
 ) -> dict:
+    """Assemble a non-interactive run's config (see fork README: "Model
+    roles: Generation vs Review" / "Legacy naming").
+
+    Model/role CLI flags: an explicit new-name flag (``cli_generation_llm`` /
+    ``cli_review_llm``) wins over its legacy equivalent (``cli_quick_think_llm``
+    -> generation, ``cli_deep_think_llm`` -> review); the merged pair is then
+    resolved against DEFAULT_CONFIG with the same inherit semantics
+    ``resolve_effective_models`` has always had (one flag alone runs the
+    whole analysis on that model). Reasoning effort follows the identical
+    new-over-legacy precedence, with no inherit logic (each role is
+    independent).
+    """
     if not language.strip():
         raise ValueError("language must not be empty")
-    effective_deep, effective_quick = resolve_effective_models(
-        DEFAULT_CONFIG, cli_deep_think_llm, cli_quick_think_llm
+
+    cli_generation_merged = cli_generation_llm or cli_quick_think_llm
+    cli_review_merged = cli_review_llm or cli_deep_think_llm
+    effective_review, effective_generation = resolve_effective_roles(
+        DEFAULT_CONFIG, cli_review=cli_review_merged, cli_generation=cli_generation_merged
     )
+
+    generation_reasoning_effort = (
+        cli_generation_reasoning_effort or cli_quick_reasoning_effort
+        or DEFAULT_CONFIG.get("generation_reasoning_effort")
+    )
+    review_reasoning_effort = (
+        cli_review_reasoning_effort or cli_deep_reasoning_effort
+        or DEFAULT_CONFIG.get("review_reasoning_effort")
+    )
+
     selections = {
         "research_depth": depth_value,
-        "quick_think_llm": effective_quick,
-        "deep_think_llm": effective_deep,
+        # Legacy key names: _build_run_config (shared with the interactive
+        # flow) only reads these; resolve_role_config below is what maps the
+        # already-resolved values here onto the canonical generation_llm/
+        # review_llm keys everything downstream reads.
+        "quick_think_llm": effective_generation,
+        "deep_think_llm": effective_review,
+        "quick_reasoning_effort": generation_reasoning_effort,
+        "deep_reasoning_effort": review_reasoning_effort,
         "backend_url": DEFAULT_CONFIG["backend_url"],
         "llm_provider": DEFAULT_CONFIG["llm_provider"],
         "google_thinking_level": DEFAULT_CONFIG.get("google_thinking_level"),
@@ -115,7 +156,7 @@ def build_headless_config(
     }
     config = _build_run_config(selections, checkpoint=None)
     config["results_dir"] = str(results_dir)
-    return config
+    return resolve_role_config(config)
 
 
 def _analysts_for_ticker(analysts: list[str], ticker: str) -> tuple[list[str], str]:
@@ -339,6 +380,7 @@ def result_document(execution, report_root: Path) -> dict[str, Any]:
         "stats": execution.stats,
         "fallback_warnings": execution.fallback_warnings,
         "research_execution": _research_execution(state),
+        "base_seed": execution.base_seed,
     }
 
 
@@ -362,7 +404,15 @@ def run_single_analysis(
     progress_prefix: str | None = None,
     deep_think_llm: str | None = None,
     quick_think_llm: str | None = None,
+    generation_llm: str | None = None,
+    review_llm: str | None = None,
+    quick_reasoning_effort: str | None = None,
+    deep_reasoning_effort: str | None = None,
+    generation_reasoning_effort: str | None = None,
+    review_reasoning_effort: str | None = None,
     trace_llm: bool = False,
+    base_seed: int | None = None,
+    configured_seed: int | None = None,
 ) -> dict[str, Any]:
     ticker = normalize_ticker_symbol(ticker)
     safe_ticker_component(ticker)
@@ -373,11 +423,16 @@ def run_single_analysis(
     config = build_headless_config(
         depth_value, language, root,
         cli_deep_think_llm=deep_think_llm, cli_quick_think_llm=quick_think_llm,
+        cli_generation_llm=generation_llm, cli_review_llm=review_llm,
+        cli_quick_reasoning_effort=quick_reasoning_effort,
+        cli_deep_reasoning_effort=deep_reasoning_effort,
+        cli_generation_reasoning_effort=generation_reasoning_effort,
+        cli_review_reasoning_effort=review_reasoning_effort,
     )
     if progress is not None:
         progress(
-            f"{progress_prefix or ticker} - Deep model: {config['deep_think_llm']}; "
-            f"Quick model: {config['quick_think_llm']}"
+            f"{progress_prefix or ticker} - Generation model: {config['generation_llm']}; "
+            f"Review model: {config['review_llm']}"
         )
     stats_handler = StatsCallbackHandler()
     started = time.monotonic()
@@ -412,6 +467,8 @@ def run_single_analysis(
             stats_handler=stats_handler,
             on_chunk=on_chunk,
             trace_llm=trace_llm,
+            base_seed=base_seed,
+            configured_seed=configured_seed,
         )
     except PartialExecutionError as exc:
         report_path = (
@@ -533,6 +590,7 @@ def write_batch_summary(
     analysts: list[str],
     language: str,
     results: list[dict],
+    base_seed: int | None = None,
 ) -> tuple[Path, Path]:
     successful = sum(result["status"] == "ok" for result in results)
     metadata = {
@@ -543,14 +601,17 @@ def write_batch_summary(
         "tickers": [result["ticker"] for result in results],
         "successful": successful,
         "failed": len(results) - successful,
+        "base_seed": base_seed,
         "results": results,
     }
     json_path = output_dir / "summary.json"
     _write_json(json_path, metadata)
 
-    lines = [
-        "# TradingAgents Batch Summary",
-        "",
+    lines = ["# TradingAgents Batch Summary", ""]
+    if base_seed is not None:
+        lines.append(f"Run seed: {base_seed}")
+        lines.append("")
+    lines += [
         "| Ticker | Status | Rating | Action | Entry | Stop | Report |",
         "|---|---|---|---|---:|---:|---|",
     ]
@@ -608,8 +669,19 @@ def run_batch_analysis(
     progress: Callable[[str], None],
     deep_think_llm: str | None = None,
     quick_think_llm: str | None = None,
+    generation_llm: str | None = None,
+    review_llm: str | None = None,
+    quick_reasoning_effort: str | None = None,
+    deep_reasoning_effort: str | None = None,
+    generation_reasoning_effort: str | None = None,
+    review_reasoning_effort: str | None = None,
     trace_llm: bool = False,
+    base_seed: int | None = None,
+    configured_seed: int | None = None,
 ) -> tuple[list[dict], Path, Path]:
+    """Run every ticker sequentially with the SAME ``base_seed`` (see
+    ``tradingagents/run_seed.py``) -- resolved once by the caller, before this
+    function runs, never regenerated per ticker."""
     analysis_date = _validate_trade_date(analysis_date)
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -641,7 +713,15 @@ def run_batch_analysis(
                 progress_prefix=f"[{index}/{len(tickers)}] {ticker}",
                 deep_think_llm=deep_think_llm,
                 quick_think_llm=quick_think_llm,
+                generation_llm=generation_llm,
+                review_llm=review_llm,
+                quick_reasoning_effort=quick_reasoning_effort,
+                deep_reasoning_effort=deep_reasoning_effort,
+                generation_reasoning_effort=generation_reasoning_effort,
+                review_reasoning_effort=review_reasoning_effort,
                 trace_llm=trace_llm,
+                base_seed=base_seed,
+                configured_seed=configured_seed,
             )
         except Exception as exc:
             # A setup-time failure that never reached graph execution (e.g. a
@@ -702,5 +782,6 @@ def run_batch_analysis(
         analysts=analysts,
         language=language,
         results=results,
+        base_seed=base_seed,
     )
     return results, markdown_path, json_path

@@ -22,8 +22,11 @@ from tradingagents.agents.structured import (
 from tradingagents.prompts.loader import load_prompt, render_agent_prompt
 
 
-def create_trader(llm):
-    structured_llm = bind_structured(llm, TraderProposal, "Trader")
+def create_trader(generation_llm):
+    """Constructs the transaction proposal from the manager's plan -- a
+    generation operation (see fork README: "Model roles: Generation vs
+    Review")."""
+    structured_llm = bind_structured(generation_llm, TraderProposal, "Trader")
 
     def trader_node(state, name):
         company_name = state["company_of_interest"]
@@ -79,10 +82,12 @@ def create_trader(llm):
 
         trader_plan = invoke_structured_or_freetext(
             structured_llm,
-            llm,
+            generation_llm,
             messages,
             render_trader_proposal,
             "Trader",
+            call_identity="trader",
+            llm_role="generation",
         )
 
         return {

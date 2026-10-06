@@ -150,10 +150,15 @@ def test_startup_display_shows_the_same_effective_models_as_the_manifest(fake_gr
         language="English", output_dir=tmp_path, progress=lines.append,
         deep_think_llm="gpt-oss:20b", trace_llm=True,
     )
-    assert any("Deep model: gpt-oss:20b" in line and "Quick model: gpt-oss:20b" in line for line in lines)
+    assert any(
+        "Generation model: gpt-oss:20b" in line and "Review model: gpt-oss:20b" in line
+        for line in lines
+    )
     manifest = json.loads((tmp_path / "debug" / "run_manifest.json").read_text())
     assert manifest["effective_deep_model"] == "gpt-oss:20b"
     assert manifest["effective_quick_model"] == "gpt-oss:20b"
+    assert manifest["generation_model"] == "gpt-oss:20b"
+    assert manifest["review_model"] == "gpt-oss:20b"
 
 
 @pytest.mark.unit

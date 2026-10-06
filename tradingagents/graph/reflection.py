@@ -2,11 +2,16 @@ from typing import Any
 
 
 class Reflector:
-    """Handles reflection on trading decisions."""
+    """Handles reflection on trading decisions.
 
-    def __init__(self, quick_thinking_llm: Any):
+    Writes a reflective summary of a past decision's outcome -- synthesis,
+    not adversarial review -- so it runs on the generation-role LLM (see
+    fork README: "Model roles: Generation vs Review").
+    """
+
+    def __init__(self, generation_llm: Any):
         """Initialize the reflector with an LLM."""
-        self.quick_thinking_llm = quick_thinking_llm
+        self.generation_llm = generation_llm
 
     def _system_prompt(self, holding_days: int) -> str:
         """Concise prompt for reflect_on_final_decision (Phase B log entries).
@@ -58,4 +63,4 @@ class Reflector:
                 ),
             ),
         ]
-        return self.quick_thinking_llm.invoke(messages).content
+        return self.generation_llm.invoke(messages).content

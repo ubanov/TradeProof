@@ -50,9 +50,9 @@ def _state():
 
 def _run_full_risk_phase(state, agg_llm, con_llm, neu_llm):
     nodes = {
-        "Aggressive Analyst": create_aggressive_debator(agg_llm),
-        "Conservative Analyst": create_conservative_debator(con_llm),
-        "Neutral Analyst": create_neutral_debator(neu_llm),
+        "Aggressive Analyst": create_aggressive_debator(agg_llm, agg_llm),
+        "Conservative Analyst": create_conservative_debator(con_llm, con_llm),
+        "Neutral Analyst": create_neutral_debator(neu_llm, neu_llm),
     }
     logic = ConditionalLogic()
     target = logic.should_continue_risk_analysis(state)
@@ -80,7 +80,7 @@ def test_aggressive_initial_cannot_see_conservative_or_neutral_initial():
     state["risk_debate_state"]["neutral_initial"] = "Neutral distinctive marker NEUMARK"
 
     agg_llm = _SeqLLM([_assessment("agg says X")])
-    create_aggressive_debator(agg_llm)(state)
+    create_aggressive_debator(agg_llm, agg_llm)(state)
 
     assert "CONMARK" not in agg_llm.prompts[0]
     assert "NEUMARK" not in agg_llm.prompts[0]
@@ -89,14 +89,15 @@ def test_aggressive_initial_cannot_see_conservative_or_neutral_initial():
 @pytest.mark.unit
 def test_conservative_initial_cannot_see_aggressive_or_neutral_initial():
     state = _state()
-    agg_result = create_aggressive_debator(_SeqLLM([_assessment("agg says a distinctive AGGMARK")]))(state)
+    agg_llm = _SeqLLM([_assessment("agg says a distinctive AGGMARK")])
+    agg_result = create_aggressive_debator(agg_llm, agg_llm)(state)
     state["risk_debate_state"] = agg_result["risk_debate_state"]
     # Neutral has not run yet in the real sequence, but even if it somehow had,
     # Conservative's independent prompt must not reference it either.
     state["risk_debate_state"]["neutral_initial"] = "Neutral distinctive marker NEUMARK"
 
     con_llm = _SeqLLM([_assessment("con says Y")])
-    create_conservative_debator(con_llm)(state)
+    create_conservative_debator(con_llm, con_llm)(state)
     assert "AGGMARK" not in con_llm.prompts[0]
     assert "NEUMARK" not in con_llm.prompts[0]
 
@@ -104,13 +105,15 @@ def test_conservative_initial_cannot_see_aggressive_or_neutral_initial():
 @pytest.mark.unit
 def test_neutral_initial_cannot_see_aggressive_or_conservative_initial():
     state = _state()
-    agg_result = create_aggressive_debator(_SeqLLM([_assessment("agg distinctive")]))(state)
+    agg_llm = _SeqLLM([_assessment("agg distinctive")])
+    agg_result = create_aggressive_debator(agg_llm, agg_llm)(state)
     state["risk_debate_state"] = agg_result["risk_debate_state"]
-    con_result = create_conservative_debator(_SeqLLM([_assessment("con distinctive")]))(state)
+    con_llm = _SeqLLM([_assessment("con distinctive")])
+    con_result = create_conservative_debator(con_llm, con_llm)(state)
     state["risk_debate_state"] = con_result["risk_debate_state"]
 
     neu_llm = _SeqLLM([_assessment("neu says Z")])
-    create_neutral_debator(neu_llm)(state)
+    create_neutral_debator(neu_llm, neu_llm)(state)
     assert "agg distinctive" not in neu_llm.prompts[0]
     assert "con distinctive" not in neu_llm.prompts[0]
 

@@ -61,7 +61,19 @@ def numbers_match(value: float, pool: list[float]) -> bool:
 # Sentence splitting
 # ---------------------------------------------------------------------------
 
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;\n])\s+")
+# A bare newline is always a boundary, not just one preceded by sentence
+# punctuation -- this project's own structured renderers (e.g.
+# ``render_risk_assessment`` in schemas.py) join section headers and bullets
+# with a single "\n", never trailing whitespace after them ("Risk level:
+# HIGH\nDisposition: REDUCE_RISK\n..."). Requiring punctuation before the
+# newline (the previous behaviour) left an unrelated header/bullet glued to
+# the next one into one giant "sentence", so a single coincidental trigger
+# word anywhere in it (e.g. "REDUCE_RISK" matching the "reduce" threshold
+# trigger) caused every unrelated number elsewhere in that whole block to be
+# flagged as if it were near that trigger -- a false-positive cascade, all
+# sharing the same truncated excerpt (see fork README: "Risk integrity
+# check" false-positive fix, real-run regression).
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;])\s+|\n+")
 
 
 def split_sentences(text: str) -> list[str]:

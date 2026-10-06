@@ -57,6 +57,16 @@ _current_stage: contextvars.ContextVar[str] = contextvars.ContextVar(
 _current_attempt: contextvars.ContextVar[str] = contextvars.ContextVar(
     "llm_trace_attempt", default="normal"
 )
+# Set by the shared invoke helpers for the duration of one call, purely for
+# observability (see fork README: "Model roles: Generation vs Review") --
+# neither affects routing or seed derivation, which already get their own
+# values passed explicitly where needed.
+_current_llm_role: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "llm_trace_llm_role", default=None
+)
+_current_call_identity: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "llm_trace_call_identity", default=None
+)
 # The directory of the most recently completed call, so the application layer
 # (which knows whether structured parsing succeeded) can attach
 # response_parsed.json / a parse-failure note without needing the LangChain
@@ -69,6 +79,34 @@ _last_call_dir: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
 _active_tracer: contextvars.ContextVar[LLMTraceCallbackHandler | None] = contextvars.ContextVar(
     "llm_trace_active_tracer", default=None
 )
+
+
+@dataclass(frozen=True)
+class SeedContext:
+    """Best-effort deterministic replay context for the current run (see
+    ``tradingagents/run_seed.py``). ``provider_supports_seed`` is resolved
+    once, from the run's configured provider, not re-checked per call."""
+
+    base_seed: int
+    ticker: str
+    provider_supports_seed: bool
+
+
+# The active run's seed context (None when seeding is off / not applicable),
+# set once per run exactly like ``_active_tracer`` -- and, like it, must be
+# explicitly reset to None at the start of every run (including untraced,
+# unseeded ones), since a batch processes tickers sequentially in the same
+# thread/process and a context set for ticker 1 would otherwise leak into
+# ticker 2 (see ``set_active_seed_context``).
+_active_seed_context: contextvars.ContextVar[SeedContext | None] = contextvars.ContextVar(
+    "llm_trace_active_seed_context", default=None
+)
+
+
+def set_active_seed_context(context: SeedContext | None) -> None:
+    """Called once per run by ``execute_analysis`` (with ``None`` when no
+    base seed is configured for this run), mirroring ``set_active_tracer``."""
+    _active_seed_context.set(context)
 
 
 def traced_node(name: str, fn):
@@ -86,16 +124,60 @@ def traced_node(name: str, fn):
     return wrapped
 
 
-def traced_invoke(llm, prompt, *, attempt: str = "normal"):
+def traced_invoke(
+    llm, prompt, *, attempt: str = "normal",
+    call_identity: str | None = None, llm_role: str | None = None,
+):
     """Call ``llm.invoke(prompt)``, tagging the active trace (if any) with
     ``attempt`` so the callback can tell a structured call apart from its
     free-text fallback. A thin, always-safe indirection: with no tracer
-    active this is exactly ``llm.invoke(prompt)``."""
-    token = _current_attempt.set(attempt)
+    active this is exactly ``llm.invoke(prompt)``.
+
+    When a seed context is active (see ``SeedContext``) and the run's
+    provider is seed-capable, also derives this call's best-effort
+    reproducible seed from ``(base_seed, ticker, current stage, call
+    identity)`` and passes it as the ``seed`` kwarg on this one invocation --
+    never by reconstructing the client, so every other call on the same
+    client keeps its own independently-derived seed. ``call_identity``
+    distinguishes logically different calls that would otherwise share the
+    same ``attempt`` (e.g. "review_1" vs "review_2"); callers that don't need
+    that distinction can omit it and ``attempt`` alone is used.
+
+    ``attempt`` is always folded into the derivation key alongside
+    ``call_identity``, not replaced by it: a structured call and its
+    free-text/JSON fallback are logically different attempts even when a
+    caller passes the same ``call_identity`` for both (e.g. the Research
+    Verifier's "pass_1" structured attempt and "pass_1" JSON fallback), and
+    must never silently collide on the same derived seed.
+
+    ``llm_role`` ("generation"/"review", see fork README: "Model roles:
+    Generation vs Review") and ``call_identity`` are also recorded on the
+    trace (when one is active) as this call's ``llm_role``/``call_identity``
+    fields in ``request.json``, purely for observability -- neither affects
+    routing (the caller already picked which LLM object to pass in) or seed
+    derivation (unchanged, driven by ``attempt``/``call_identity`` as before).
+    """
+    attempt_token = _current_attempt.set(attempt)
+    role_token = _current_llm_role.set(llm_role)
+    identity_token = _current_call_identity.set(call_identity)
     try:
+        seed_ctx = _active_seed_context.get()
+        if seed_ctx is not None and seed_ctx.provider_supports_seed:
+            from tradingagents.run_seed import derive_call_seed
+
+            identity = f"{attempt}:{call_identity}" if call_identity else attempt
+            call_seed = derive_call_seed(
+                seed_ctx.base_seed,
+                seed_ctx.ticker,
+                _current_stage.get(),
+                identity,
+            )
+            return llm.invoke(prompt, seed=call_seed)
         return llm.invoke(prompt)
     finally:
-        _current_attempt.reset(token)
+        _current_attempt.reset(attempt_token)
+        _current_llm_role.reset(role_token)
+        _current_call_identity.reset(identity_token)
 
 
 def set_active_tracer(tracer: LLMTraceCallbackHandler | None) -> None:
@@ -292,6 +374,9 @@ def write_run_manifest(
     config: dict,
     prompt_hashes: dict[str, str],
     on_warn,
+    configured_seed: int | None = None,
+    base_seed: int | None = None,
+    seed_provider_supported: bool | None = None,
 ) -> None:
     manifest = {
         "trace_format_version": TRACE_FORMAT_VERSION,
@@ -302,14 +387,41 @@ def write_run_manifest(
         "analysts": list(analysts),
         "language": language,
         "provider": provider,
+        # Legacy field names (deprecated, see fork README "Legacy naming":
+        # quick -> generation, deep -> review). generation_model/review_model
+        # below are the canonical fields; these are kept for any existing
+        # manifest consumer that already reads them.
         "effective_deep_model": effective_deep_model,
         "effective_quick_model": effective_quick_model,
+        "generation_model": config.get("generation_llm"),
+        "review_model": config.get("review_llm"),
         "model_parameters": {
             "temperature": config.get("temperature"),
             "max_tokens": config.get("max_tokens"),
             "top_p": config.get("top_p"),
             "llm_max_retries": config.get("llm_max_retries"),
         },
+        # Best-effort deterministic replay (see tradingagents/run_seed.py):
+        # configured_seed is whatever the user passed (0 = auto-generate);
+        # base_seed is the actual value used to derive every call's seed this
+        # run -- the one to reuse with --seed to attempt reproducing this run.
+        # seed_provider_supported records whether this run's provider was
+        # seed-capable at all; per-call effective seeds (when applied) are
+        # already visible in each call's own request.json generation_params.
+        "configured_seed": configured_seed,
+        "base_seed": base_seed,
+        "seed_provider_supported": seed_provider_supported,
+        # Generation vs Review reasoning effort (see fork README): whatever
+        # was *configured* for this run, None meaning "no override was sent,
+        # the backend/model's own default applied" -- never a guessed
+        # effective default. The actual per-call value, when one was sent, is
+        # already visible in each call's own request.json generation_params.
+        # quick_reasoning_effort/deep_reasoning_effort are the deprecated
+        # legacy field names, kept for any existing manifest consumer.
+        "generation_reasoning_effort": config.get("generation_reasoning_effort"),
+        "review_reasoning_effort": config.get("review_reasoning_effort"),
+        "quick_reasoning_effort": config.get("quick_reasoning_effort"),
+        "deep_reasoning_effort": config.get("deep_reasoning_effort"),
         "package_version": _package_version(),
         "git": _git_info(),
         "prompt_file_hashes": prompt_hashes,
@@ -408,6 +520,11 @@ class LLMTraceCallbackHandler(BaseCallbackHandler):
             "call_number": number,
             "stage": stage,
             "attempt": attempt,
+            # "generation"/"review" (see fork README: "Model roles:
+            # Generation vs Review"), or None for a call that didn't go
+            # through a role-aware helper (e.g. Reflection's raw .invoke()).
+            "llm_role": _current_llm_role.get(),
+            "call_identity": _current_call_identity.get(),
             "model": invocation_params.get("model") or (serialized or {}).get("name"),
             "provider": invocation_params.get("_type") or (serialized or {}).get("id"),
             "messages": _serialize_messages(messages),
@@ -512,7 +629,7 @@ class LLMTraceCallbackHandler(BaseCallbackHandler):
     # -- aggregate summary ----------------------------------------------------
 
     def write_summary(
-        self, *, stats: dict, elapsed_seconds: float, deep_model: str, quick_model: str
+        self, *, stats: dict, elapsed_seconds: float, generation_model: str, review_model: str
     ) -> None:
         summary = {
             "llm_calls": stats.get("llm_calls"),
@@ -522,7 +639,12 @@ class LLMTraceCallbackHandler(BaseCallbackHandler):
             "input_tokens": stats.get("tokens_in"),
             "output_tokens": stats.get("tokens_out"),
             "elapsed_seconds": round(elapsed_seconds, 3),
-            "deep_model": deep_model,
-            "quick_model": quick_model,
+            "generation_model": generation_model,
+            "review_model": review_model,
+            # Legacy field names (deprecated, see fork README "Legacy
+            # naming": quick -> generation, deep -> review), kept for any
+            # existing summary consumer.
+            "deep_model": review_model,
+            "quick_model": generation_model,
         }
         _safe_write_json(self.debug_dir / "trace_summary.json", summary, self._warn)

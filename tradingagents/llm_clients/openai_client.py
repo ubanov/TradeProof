@@ -204,7 +204,17 @@ class ProviderSpec:
     placeholder_key: str = "EMPTY"            # sent when no key is available (keyless local servers)
     require_base_url: bool = False            # error if no base_url is resolved (generic endpoint)
     use_responses_api: bool = False           # native OpenAI Responses API
+    default_max_tokens: int | None = None     # fallback output-token cap when the user sets none
 
+
+# A local Ollama model has no provider-side output cap the way a paid API
+# effectively does, and a quantized/weaker model can fail to ever emit a stop
+# token -- observed in real runs as a single call consuming the entire context
+# window (~131K tokens, 30+ minutes, empty content/no tool call) instead of a
+# normal few-thousand-token response. This is a safety floor, not a context-
+# length change: a real user-set ``max_tokens`` (TRADINGAGENTS_MAX_TOKENS or
+# config) always overrides it -- see ``OpenAIClient.get_llm``.
+OLLAMA_DEFAULT_MAX_TOKENS = 8192
 
 # Single source of truth for the OpenAI-compatible provider family. Dual-region
 # providers (qwen/glm/minimax) keep separate endpoints because international and
@@ -226,8 +236,11 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "nvidia":     ProviderSpec(base_url="https://integrate.api.nvidia.com/v1"),
     "ollama":     ProviderSpec(base_url="http://localhost:11434/v1", base_url_env="OLLAMA_BASE_URL",
                                key_optional=True, placeholder_key="ollama",
-                               chat_class=LocalCompatibleChatOpenAI),
+                               chat_class=LocalCompatibleChatOpenAI,
+                               default_max_tokens=OLLAMA_DEFAULT_MAX_TOKENS),
     # Generic endpoint: user supplies base_url; key optional (keyless local).
+    # No default_max_tokens here -- unlike "ollama" this covers arbitrary local
+    # servers (LM Studio, vLLM, llama.cpp) this guardrail was not requested for.
     "openai_compatible": ProviderSpec(
         require_base_url=True, key_optional=True, chat_class=LocalCompatibleChatOpenAI
     ),
@@ -326,7 +339,17 @@ class OpenAIClient(BaseLLMClient):
         for key in _PASSTHROUGH_KWARGS:
             if key not in self.kwargs:
                 continue
-            if key == "reasoning_effort" and not _supports_reasoning_effort(self.model):
+            # The native-OpenAI-model-name gate below only applies to the
+            # "openai" provider itself: Ollama's OpenAI-compatible endpoint
+            # (the only other provider build_llm_kwargs ever populates
+            # reasoning_effort for) accepts it for its own thinking-capable
+            # models regardless of model-name shape, and is not a 4xx risk
+            # the way an unsupported native-OpenAI model is.
+            if (
+                key == "reasoning_effort"
+                and self.provider == "openai"
+                and not _supports_reasoning_effort(self.model)
+            ):
                 continue
             # OpenAI's reasoning-tier models (o-series, GPT-5+) 400 on a
             # non-default temperature ("Unsupported value: 'temperature' does
@@ -335,6 +358,12 @@ class OpenAIClient(BaseLLMClient):
             if key == "temperature" and _supports_reasoning_effort(self.model):
                 continue
             llm_kwargs[key] = self.kwargs[key]
+
+        # Runaway-generation safety floor (see OLLAMA_DEFAULT_MAX_TOKENS):
+        # only applied when the provider declares one (Ollama only, today)
+        # and the user did not already set max_tokens explicitly above.
+        if spec is not None and spec.default_max_tokens is not None and "max_tokens" not in llm_kwargs:
+            llm_kwargs["max_tokens"] = spec.default_max_tokens
 
         # The subclass (provider quirks) comes from the registry spec.
         return chat_cls(**llm_kwargs)
