@@ -25,6 +25,13 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_REVIEW_LLM":                  "review_llm",
     "TRADINGAGENTS_GENERATION_REASONING_EFFORT": "generation_reasoning_effort",
     "TRADINGAGENTS_REVIEW_REASONING_EFFORT":     "review_reasoning_effort",
+    # Validator: a lightweight contract/format/arithmetic quality-control
+    # role, distinct from generation/review (see fork README: "Generation /
+    # Validation / Review"). Opt-in -- validation_enabled defaults to False
+    # so an existing config never silently starts making extra LLM calls.
+    "TRADINGAGENTS_VALIDATOR_LLM":              "validator_llm",
+    "TRADINGAGENTS_VALIDATOR_REASONING_EFFORT": "validator_reasoning_effort",
+    "TRADINGAGENTS_VALIDATION_ENABLED":         "validation_enabled",
     "TRADINGAGENTS_LLM_BACKEND_URL":      "backend_url",
     "TRADINGAGENTS_OUTPUT_LANGUAGE":      "output_language",
     "TRADINGAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
@@ -201,6 +208,30 @@ def resolve_role_config(config: dict) -> dict:
     return config
 
 
+def resolve_validation_config(config: dict) -> dict:
+    """Validates the Validator role's configuration (see fork README:
+    "Generation / Validation / Review"). Call once all CLI/env/config
+    sources have been merged -- e.g. right after ``resolve_role_config`` in
+    ``execute_analysis`` -- so a flag supplied later in the merge isn't
+    rejected prematurely.
+
+    Deliberately never falls back to ``generation_llm`` when
+    ``validation_enabled`` is set but ``validator_llm`` isn't: that would
+    silently add real LLM calls/cost on an existing config that only meant
+    to flip the feature flag on. Fails loudly instead, before any run work
+    starts.
+    """
+    if config.get("validation_enabled") and not config.get("validator_llm"):
+        raise ValueError(
+            "validation_enabled is set but no validator_llm is configured. "
+            "Set TRADINGAGENTS_VALIDATOR_LLM (or --validator-llm) to a model "
+            "name, or disable validation (TRADINGAGENTS_VALIDATION_ENABLED=false "
+            "/ --no-validation). There is no automatic fallback to "
+            "generation_llm -- that would silently change cost and behavior."
+        )
+    return config
+
+
 DEFAULT_CONFIG = resolve_role_config(_apply_env_overrides({
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR") or os.path.join(_TRADINGAGENTS_HOME, "logs"),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR") or os.path.join(_TRADINGAGENTS_HOME, "cache"),
@@ -221,6 +252,16 @@ DEFAULT_CONFIG = resolve_role_config(_apply_env_overrides({
     "review_llm": None,
     "generation_reasoning_effort": None,
     "review_reasoning_effort": None,
+    # Validator role (see fork README: "Generation / Validation / Review"):
+    # a lightweight contract/format/arithmetic check, distinct from
+    # generation/review. No legacy name to resolve -- validator_llm is new.
+    # validation_enabled defaults to False (opt-in): deterministic checks
+    # always run (cheap), but the Validator LLM call never fires unless this
+    # is explicitly turned on, so an existing config never silently starts
+    # making extra LLM calls.
+    "validator_llm": None,
+    "validator_reasoning_effort": None,
+    "validation_enabled": False,
     # Legacy aliases (deprecated, see fork README "Legacy naming": quick ->
     # generation, deep -> review). Still accepted as input; resolve_role_config
     # resolves and mirrors them, so no other code should read these directly.

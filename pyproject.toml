@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tradingagents"
 version = "0.9.0"
-description = "TradingAgents: Multi-Agents LLM Financial Trading Framework"
+description = "TradeProof: a heavily modified fork of TradingAgents, a multi-agent LLM financial trading framework"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

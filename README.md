@@ -343,22 +343,34 @@ most from upstream; the full, detailed list is in
   tradingagents batch --tickers NVDA,SPY,BTC-USD
   ```
 
-### Model roles: Generation vs Review
+### Model roles: Generation / Validation / Review
 
 This fork routes every LLM call by **cognitive function**, not by model
-size/speed/cost. Two roles:
+size/speed/cost. Three roles:
 
 - **Generation** — produce, extract, structure, synthesize, propose, decide:
   evidence gathering, first-pass analysis, initial thesis generation,
   synthesis, decision construction.
+- **Validation** — check contract/format/arithmetic/obvious consistency on a
+  candidate response *before* it moves to the next stage. Validator is **not**
+  another analyst or investment opinion: it never judges thesis quality, never
+  second-guesses a reasonable inference, and never recommends an
+  action/rating/disposition. It only flags objectively checkable problems
+  (a number that doesn't add up, a stated relationship that contradicts the
+  cited values, a unit mix-up, a missing required field, a structured field
+  that contradicts the narrative, a value with no support in the inputs).
+  See [Validation](#validation) below.
 - **Review** — challenge, verify, audit, correct, repair: adversarial review,
-  verification, repair, cross-review.
+  verification, repair, cross-review, intellectual quality of a thesis, buy/
+  sell/strategy reasonableness, complex inference and semantic contradictions.
 
-A generation-role model can be enormous and slow; a review-role model can be
-small and fast — the names describe what a call *does* in the pipeline, not
-how big or fast the model behind it is. `generation_llm` and `review_llm` can
-point at the same model or two different ones; nothing in the pipeline
-depends on which.
+A role's model can be enormous and slow, or small and fast — the names
+describe what a call *does* in the pipeline, not how big or fast the model
+behind it is. `generation_llm`, `validator_llm`, and `review_llm` can all
+point at the same model or three different ones; nothing in the pipeline
+depends on which. Validator is commonly a small/cheap model since its checks
+are narrow and objective, but nothing requires that — role defines function,
+not size.
 
 This split replaced an earlier `quick_think_llm`/`deep_think_llm` pair whose
 names described neither function nor, reliably, size/speed any more as the
@@ -379,6 +391,9 @@ needs the slower model) — see [Legacy naming](#legacy-naming) below.
 | Risk: Aggressive / Conservative / Neutral cross-review | Review |
 | Portfolio Manager | Generation |
 
+Trader and Portfolio Manager additionally run their structured output through
+Validator when validation is enabled — see [Validation](#validation).
+
 Canonical recovery (reconstructing structured state from a free-text
 fallback) always inherits the role of the call it is recovering — a Bull
 initial-thesis fallback recovers on generation, a Bull review fallback
@@ -394,8 +409,8 @@ strengths between structured generation/synthesis and adversarial
 review/auditing, which is what motivated separating the two roles instead of
 using one model knob for the whole pipeline.
 
-Example configuration (just an example — any compatible model works, and
-generation/review may be the same model):
+Example configuration (just an example — any compatible model works, and any
+two or three roles may share the same model):
 
 ```bash
 # .env
@@ -404,6 +419,12 @@ TRADINGAGENTS_GENERATION_REASONING_EFFORT=high
 
 TRADINGAGENTS_REVIEW_LLM=qwen3.8-flash-next:125b-a6b-q4_K_M
 TRADINGAGENTS_REVIEW_REASONING_EFFORT=medium
+
+# Validation is opt-in (see "Validation" below) -- validator_llm is only
+# needed when validation is enabled.
+TRADINGAGENTS_VALIDATION_ENABLED=true
+TRADINGAGENTS_VALIDATOR_LLM=gpt-oss:20b
+TRADINGAGENTS_VALIDATOR_REASONING_EFFORT=low
 ```
 
 #### Legacy naming
@@ -423,6 +444,113 @@ An explicit new name always wins over its legacy equivalent if both are set
 (e.g. `TRADINGAGENTS_GENERATION_LLM` over `TRADINGAGENTS_QUICK_THINK_LLM`);
 otherwise the legacy value is used. There is no need to migrate an existing
 `.env` — the legacy names are deprecated, not removed.
+
+### Validation
+
+Validator is a lightweight quality-control layer, not another analyst: it
+checks a candidate response's contract/format/arithmetic/obvious consistency
+*before* that response moves to the next stage, and — only on an objective
+FAIL — sends the **same original agent** (same LLM, same role, same reasoning
+effort) back to correct ONLY the reported problems. Validator itself never
+rewrites content and never produces a BUY/HOLD/SELL/rating/disposition.
+
+```
+Agent produces candidate output
+        |
+deterministic validation (always, cheap -- JSON/schema, arithmetic, known
+        |                 entry/stop/unit relationships, structural checks)
+optional Validator LLM (validation_enabled only -- narrow, objective checks)
+        |
+      PASS/WARN? --yes--> next stage
+        | FAIL
+validation_enabled? --no--> next stage (FAIL recorded, nothing repaired)
+        | yes
+SAME original agent repairs ONLY the reported findings (max ONE attempt)
+        |
+final validation status (observability -- never a second repair)
+```
+
+**With validation disabled** (the default): deterministic checks still run
+and are still recorded in the saved report/`validation_log` for
+observability, but a FAIL there is never repaired, never calls the Validator
+LLM, and never mutates the candidate response.
+
+**With validation enabled**: deterministic checks plus the optional Validator
+LLM, and a FAIL from either one triggers the single bounded repair below.
+
+**Deterministic checks always run** (cheap, no LLM call) when applicable to
+the stage: JSON/schema validity, required fields, known trade-metric
+arithmetic, entry/stop-loss direction, unit and relational consistency —
+reusing the same primitives the Manager/Risk integrity checks already use
+(`tradingagents/agents/integrity_shared.py`, `researchers/arithmetic.py`),
+never a second implementation of the same calculation.
+
+**Output recovery and false-positive filtering**: a small/local
+`validator_llm` frequently answers the right PASS/WARN/FAIL verdict without
+managing the structured tool-call shape. Validator recovers from that SAME
+attempt's raw text first (direct JSON parse, then a narrow mechanical reading
+of unambiguous text like `PASS` or `status: FAIL` plus a couple of short
+bullet reasons) — refusing outright on any contradiction or long/ambiguous
+prose. Only when that's impossible does it make one SEPARATE call, and that
+call is format-repair only (resend the model's own prior answer + schema,
+never the candidate/evidence again), so a real verdict is never silently
+overturned by a second, independently-judged attempt. Separately, a finding
+is mechanically re-checked against the evidence Validator was actually given
+before it's finalized — never against the candidate text itself, which is
+what's being checked, not its own support: a number the model calls
+unsupported but that literally appears in the evidence, or a relational/unit
+claim the stage's own deterministic scanner can't reproduce, is dropped as a
+false positive rather than triggering an unnecessary repair. Trader and
+Portfolio Manager's `evidence_context` mirrors each stage's own allowed
+sources (technical market report, portfolio context, etc.) so Validator never
+flags a number the agent was legitimately entitled to cite. See
+`docs/model-routing.md` §3.3 for the full detail and exact rules.
+
+**The Validator LLM is opt-in** (`validation_enabled`/`--validation`) and,
+when enabled, checks only a narrow, objective taxonomy: arithmetic/relational/
+unit errors, a value treated as fact with no support, missing required
+elements, a format/contract violation, and internal contradictions. It never
+judges thesis quality, investment reasoning, or strategy — that remains
+Review's job.
+
+**Bounded repair**: at most one repair attempt per validated output, always
+by the same LLM/role that produced the candidate (a Trader finding repairs via
+`generation_llm`, never via `validator_llm`). The repair prompt is
+restrictive: correct ONLY the reported problems, preserve every other claim
+and number, introduce no new evidence/levels/recommendations, keep the exact
+same contract/format. The result is rechecked once; if still FAIL, it is
+recorded as unresolved and the pipeline continues — never a second repair,
+never a loop.
+
+**Where it's wired today**: Trader and Portfolio Manager — their structured,
+decision-critical output is the clearest case for this first pass. Analyst
+reports, Bull/Bear theses and reviews, Research Verifier, Research Manager,
+and Risk's independent/cross-review assessments are deliberately **not**
+validated yet; extending Validator's deterministic-only or full coverage to
+those stages is future work, not a limitation of the central infrastructure
+(`tradingagents/agents/validator.py`, `validator_deterministic.py`,
+`validation_schemas.py`), which is stage-agnostic.
+
+Configuration:
+
+| Setting | Env var | CLI flag |
+|---|---|---|
+| Validator model | `TRADINGAGENTS_VALIDATOR_LLM` | `--validator-llm` |
+| Validator reasoning effort | `TRADINGAGENTS_VALIDATOR_REASONING_EFFORT` | `--validator-reasoning-effort` |
+| Enable validation | `TRADINGAGENTS_VALIDATION_ENABLED` | `--validation` / `--no-validation` |
+
+There is **no silent fallback** to `generation_llm`: if `validation_enabled`
+is true and no `validator_llm` is configured, the run fails fast with a clear
+configuration error before any execution starts, rather than silently
+changing cost/behavior.
+
+Console output stays quiet on success — no line is printed per PASS. A
+`[WARN]` line appears only when a stage's validation fails and a repair is
+attempted, and again if it still fails after that repair; full detail lives
+in the saved report's "Validation" section and, with `--trace-llm`, in the
+trace (`llm_role: "validator"`, plus the original agent's repair call still
+recorded under its own real role with a `..._validation_repair` call
+identity).
 
 ### Model overrides and LLM trace mode
 

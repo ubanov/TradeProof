@@ -14,6 +14,7 @@ from tradingagents.agents.researchers.research_summary import render_research_co
 from tradingagents.agents.researchers.verification import render_verification_history
 from tradingagents.agents.risk_mgmt.integrity_check import render_risk_integrity_report
 from tradingagents.agents.schemas import render_risk_stance_summary
+from tradingagents.agents.validator import render_validation_summary
 
 
 def write_report_tree(
@@ -161,6 +162,12 @@ def write_report_tree(
                 f"## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{decision_text}"
                 f"\n\n(Disposition: {disposition})"
             )
+
+    # 6. Validation (see fork README: "Generation / Validation / Review") --
+    # compact counts plus only unresolved findings, never a per-stage dump.
+    validation_summary = render_validation_summary(final_state.get("validation_log", []))
+    if validation_summary:
+        sections.append(f"## VI. Validation\n\n{validation_summary}")
 
     # Write consolidated report
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"

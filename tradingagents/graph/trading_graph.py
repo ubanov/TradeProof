@@ -13,7 +13,11 @@ from tradingagents.dataflows.config import run_config, set_config
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.decision_log import TradingMemoryLog
-from tradingagents.default_config import DEFAULT_CONFIG, resolve_role_config
+from tradingagents.default_config import (
+    DEFAULT_CONFIG,
+    resolve_role_config,
+    resolve_validation_config,
+)
 from tradingagents.llm_clients import build_llm_kwargs, create_llm_client
 from tradingagents.reporting import write_report_tree
 
@@ -75,6 +79,11 @@ class TradingAgentsGraph:
         # programmatic caller constructed directly. Idempotent and safe to
         # call even when the config was already resolved upstream.
         self.config = resolve_role_config(self.config)
+        # Safety net for a programmatic caller that never went through the
+        # CLI's own earlier check (see fork README: "Generation / Validation
+        # / Review"): fails loudly, before any client is constructed, rather
+        # than silently falling back to generation_llm.
+        self.config = resolve_validation_config(self.config)
 
         # Built once per role (not shared) so each can carry its own
         # independently configured reasoning effort -- generation_reasoning_
@@ -110,6 +119,24 @@ class TradingAgentsGraph:
         self.quick_thinking_llm = self.generation_llm
         self.deep_thinking_llm = self.review_llm
 
+        # Validator (see fork README: "Generation / Validation / Review"):
+        # only constructed when validation is actually enabled, so a run that
+        # never uses it doesn't require an API key / pay for a client it
+        # never calls. resolve_validation_config above already guarantees
+        # validator_llm is set whenever validation_enabled is True.
+        self.validator_llm = None
+        if self.config.get("validation_enabled"):
+            validator_llm_kwargs = build_llm_kwargs(self.config, role="validator")
+            if self.callbacks:
+                validator_llm_kwargs["callbacks"] = self.callbacks
+            validator_client = create_llm_client(
+                provider=self.config["llm_provider"],
+                model=self.config["validator_llm"],
+                base_url=self.config.get("backend_url"),
+                **validator_llm_kwargs,
+            )
+            self.validator_llm = validator_client.get_llm()
+
         self.memory_log = TradingMemoryLog(self.config)
 
         self.conditional_logic = ConditionalLogic(
@@ -120,6 +147,7 @@ class TradingAgentsGraph:
             self.generation_llm,
             self.review_llm,
             self.conditional_logic,
+            validator_llm=self.validator_llm,
         )
 
         self.propagator = Propagator(

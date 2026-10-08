@@ -29,15 +29,32 @@ from tradingagents.agents.schemas import (
 from tradingagents.agents.structured import (
     NO_EXTERNAL_TOOLS,
     bind_structured,
-    invoke_structured_or_freetext,
+    invoke_structured_or_freetext_parsed,
 )
+from tradingagents.agents.validator import validate_and_repair
+from tradingagents.agents.validator_deterministic import check_text_relational_and_unit_errors
 from tradingagents.prompts.loader import render_agent_prompt
 
+# Compact, hand-written contract summary for the Validator (see fork README:
+# "Generation / Validation / Review") -- not the full rendered prompt.
+_PM_CONTRACT = (
+    "Produce a final decision: rating (Buy/Overweight/Hold/Underweight/Sell), "
+    "disposition toward the Trader's plan (KEEP/DEFER/REDUCE_RISK/REJECT_PLAN, "
+    "a separate concept from rating), executive_summary, investment_thesis, "
+    "optional price_target, optional time_horizon."
+)
 
-def create_portfolio_manager(generation_llm):
+
+def _pm_deterministic_checks(text: str, _parsed):
+    return check_text_relational_and_unit_errors(text)
+
+
+def create_portfolio_manager(generation_llm, validator_llm=None):
     """The critical review already happened in Risk's cross-review; Portfolio
     Manager synthesizes and decides -- a generation operation (see fork
-    README: "Model roles: Generation vs Review")."""
+    README: "Model roles: Generation vs Review"). ``validator_llm`` is
+    ``None`` unless validation is enabled; deterministic checks (unit/
+    relational errors) run unconditionally either way."""
     structured_llm = bind_structured(generation_llm, PortfolioDecision, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:
@@ -80,7 +97,7 @@ def create_portfolio_manager(generation_llm):
             NO_EXTERNAL_TOOLS=NO_EXTERNAL_TOOLS,
         ) + get_language_instruction()
 
-        final_trade_decision = invoke_structured_or_freetext(
+        final_trade_decision, parsed = invoke_structured_or_freetext_parsed(
             structured_llm,
             generation_llm,
             prompt,
@@ -89,6 +106,33 @@ def create_portfolio_manager(generation_llm):
             call_identity="portfolio_manager",
             llm_role="generation",
         )
+
+        outcome = validate_and_repair(
+            stage="Portfolio Manager",
+            validator_llm=validator_llm,
+            original_llm=generation_llm,
+            original_role="generation",
+            call_identity_base="portfolio_manager",
+            instructions=_PM_CONTRACT,
+            # Must cover the same sources Portfolio Manager's own prompt
+            # actually gives it (see managers/portfolio_manager.txt) -- not
+            # just the research/trader plans and Risk discussion, or
+            # Validator flags a legitimately-cited portfolio/lessons number
+            # as UNSUPPORTED_NUMBER simply for falling outside its own,
+            # narrower evidence window.
+            evidence_context=(
+                f"Research plan:\n{research_plan}\n\nTrader plan:\n{trader_plan}\n\n"
+                f"Risk discussion:\n{history}\n\nPortfolio context:\n{portfolio_context}"
+                + (f"\n\nPrior lessons:\n{past_context}" if past_context else "")
+            ),
+            candidate_text=final_trade_decision,
+            candidate_parsed=parsed,
+            expected_schema=PortfolioDecision,
+            render_fn=render_pm_decision,
+            deterministic_check_fn=_pm_deterministic_checks,
+        )
+        final_trade_decision = outcome.final_text
+        validation_log = [*state.get("validation_log", []), outcome.as_log_entry("Portfolio Manager")]
 
         # Real structured state, not inferred from `rating`: on a successful
         # structured call, `render_pm_decision` deterministically wrote
@@ -116,6 +160,7 @@ def create_portfolio_manager(generation_llm):
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
+            "validation_log": validation_log,
         }
 
     return portfolio_manager_node

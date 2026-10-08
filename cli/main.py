@@ -154,6 +154,25 @@ def run_non_interactive(
         help="Deprecated alias for --review-reasoning-effort (see README: "
         "'Legacy naming').",
     ),
+    validator_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_VALIDATOR_LLM", "--validator-llm",
+        help="Model for the Validator role (see README: 'Generation / "
+        "Validation / Review') -- a lightweight contract/format/arithmetic "
+        "check, not another analyst opinion. Required if --validation is on.",
+    ),
+    validator_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_VALIDATOR_REASONING_EFFORT", "--validator-reasoning-effort",
+        help="Reasoning effort for the Validator model, independent of "
+        "generation/review. See README: 'Generation / Validation / Review'.",
+    ),
+    validation_enabled: bool | None = typer.Option(
+        None, "--validation/--no-validation",
+        help="Enable the optional Validator LLM pass (see README: "
+        "'Generation / Validation / Review'). Off by default -- deterministic "
+        "checks always run regardless; this only gates the extra LLM calls. "
+        "Requires --validator-llm (or TRADINGAGENTS_VALIDATOR_LLM) when on; "
+        "there is no silent fallback to the generation model.",
+    ),
     trace_llm: bool = typer.Option(
         False, "--trace-llm",
         help="Save a complete, auditable trace of every LLM call (rendered "
@@ -197,6 +216,9 @@ def run_non_interactive(
             deep_reasoning_effort=deep_reasoning_effort,
             generation_reasoning_effort=generation_reasoning_effort,
             review_reasoning_effort=review_reasoning_effort,
+            validator_llm=validator_llm,
+            validator_reasoning_effort=validator_reasoning_effort,
+            validation_enabled=validation_enabled,
             trace_llm=trace_llm,
             base_seed=base_seed,
             configured_seed=configured_seed,
@@ -237,6 +259,14 @@ def run_non_interactive(
         f"({research['verifier_passes']} pass(es), "
         f"{research['repair_rounds']} repair(s))"
     )
+    validation = result.get("validation") or {}
+    if validation.get("checked"):
+        echo(
+            f"Validation: stages checked: {validation['checked']} / "
+            f"pass: {validation['pass']} / warn: {validation['warn']} / "
+            f"fail: {validation['fail']} / repairs: {validation['repairs']} / "
+            f"unresolved: {validation['unresolved']}"
+        )
 
 
 @app.command("batch")
@@ -311,6 +341,26 @@ def batch_non_interactive(
         help="Deprecated alias for --review-reasoning-effort (see README: "
         "'Legacy naming').",
     ),
+    validator_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_VALIDATOR_LLM", "--validator-llm",
+        help="Model for the Validator role (see README: 'Generation / "
+        "Validation / Review') -- a lightweight contract/format/arithmetic "
+        "check, not another analyst opinion. Required if --validation is on.",
+    ),
+    validator_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_VALIDATOR_REASONING_EFFORT", "--validator-reasoning-effort",
+        help="Reasoning effort for the Validator model, independent of "
+        "generation/review. See README: 'Generation / Validation / Review'.",
+    ),
+    validation_enabled: bool | None = typer.Option(
+        None, "--validation/--no-validation",
+        help="Enable the optional Validator LLM pass for this batch (see "
+        "README: 'Generation / Validation / Review'). Off by default -- "
+        "deterministic checks always run regardless; this only gates the "
+        "extra LLM calls. Requires --validator-llm (or "
+        "TRADINGAGENTS_VALIDATOR_LLM) when on; there is no silent fallback "
+        "to the generation model.",
+    ),
     trace_llm: bool = typer.Option(
         False, "--trace-llm",
         help="Save a complete, auditable trace of every LLM call (rendered "
@@ -377,6 +427,9 @@ def batch_non_interactive(
             deep_reasoning_effort=deep_reasoning_effort,
             generation_reasoning_effort=generation_reasoning_effort,
             review_reasoning_effort=review_reasoning_effort,
+            validator_llm=validator_llm,
+            validator_reasoning_effort=validator_reasoning_effort,
+            validation_enabled=validation_enabled,
             trace_llm=trace_llm,
             base_seed=base_seed,
             configured_seed=configured_seed,

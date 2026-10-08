@@ -23,11 +23,13 @@ from cli.run import (
 )
 from cli.stats_handler import StatsCallbackHandler
 from tradingagents.agents.rating import RATINGS_5_TIER, extract_choice, is_review
+from tradingagents.agents.validator import summarize_validation_log
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.default_config import (
     DEFAULT_CONFIG,
     resolve_effective_roles,
     resolve_role_config,
+    resolve_validation_config,
 )
 from tradingagents.graph.conditional_logic import RISK_ANALYSIS_TOTAL_TURNS
 from tradingagents.graph.trading_graph import _validate_trade_date
@@ -106,6 +108,9 @@ def build_headless_config(
     cli_deep_reasoning_effort: str | None = None,
     cli_generation_reasoning_effort: str | None = None,
     cli_review_reasoning_effort: str | None = None,
+    cli_validator_llm: str | None = None,
+    cli_validator_reasoning_effort: str | None = None,
+    cli_validation_enabled: bool | None = None,
 ) -> dict:
     """Assemble a non-interactive run's config (see fork README: "Model
     roles: Generation vs Review" / "Legacy naming").
@@ -136,6 +141,14 @@ def build_headless_config(
         cli_review_reasoning_effort or cli_deep_reasoning_effort
         or DEFAULT_CONFIG.get("review_reasoning_effort")
     )
+    validator_llm = cli_validator_llm or DEFAULT_CONFIG.get("validator_llm")
+    validator_reasoning_effort = (
+        cli_validator_reasoning_effort or DEFAULT_CONFIG.get("validator_reasoning_effort")
+    )
+    validation_enabled = (
+        cli_validation_enabled if cli_validation_enabled is not None
+        else DEFAULT_CONFIG.get("validation_enabled", False)
+    )
 
     selections = {
         "research_depth": depth_value,
@@ -152,11 +165,18 @@ def build_headless_config(
         "google_thinking_level": DEFAULT_CONFIG.get("google_thinking_level"),
         "openai_reasoning_effort": DEFAULT_CONFIG.get("openai_reasoning_effort"),
         "anthropic_effort": DEFAULT_CONFIG.get("anthropic_effort"),
+        "validator_llm": validator_llm,
+        "validator_reasoning_effort": validator_reasoning_effort,
+        "validation_enabled": validation_enabled,
         "output_language": language.strip(),
     }
     config = _build_run_config(selections, checkpoint=None)
     config["results_dir"] = str(results_dir)
-    return resolve_role_config(config)
+    config = resolve_role_config(config)
+    # Fails loudly here too (before the progress line below even prints),
+    # not only in execute_analysis -- see fork README: "Generation /
+    # Validation / Review".
+    return resolve_validation_config(config)
 
 
 def _analysts_for_ticker(analysts: list[str], ticker: str) -> tuple[list[str], str]:
@@ -380,6 +400,7 @@ def result_document(execution, report_root: Path) -> dict[str, Any]:
         "stats": execution.stats,
         "fallback_warnings": execution.fallback_warnings,
         "research_execution": _research_execution(state),
+        "validation": summarize_validation_log(state.get("validation_log", [])),
         "base_seed": execution.base_seed,
     }
 
@@ -410,6 +431,9 @@ def run_single_analysis(
     deep_reasoning_effort: str | None = None,
     generation_reasoning_effort: str | None = None,
     review_reasoning_effort: str | None = None,
+    validator_llm: str | None = None,
+    validator_reasoning_effort: str | None = None,
+    validation_enabled: bool | None = None,
     trace_llm: bool = False,
     base_seed: int | None = None,
     configured_seed: int | None = None,
@@ -428,6 +452,9 @@ def run_single_analysis(
         cli_deep_reasoning_effort=deep_reasoning_effort,
         cli_generation_reasoning_effort=generation_reasoning_effort,
         cli_review_reasoning_effort=review_reasoning_effort,
+        cli_validator_llm=validator_llm,
+        cli_validator_reasoning_effort=validator_reasoning_effort,
+        cli_validation_enabled=validation_enabled,
     )
     if progress is not None:
         progress(
@@ -675,6 +702,9 @@ def run_batch_analysis(
     deep_reasoning_effort: str | None = None,
     generation_reasoning_effort: str | None = None,
     review_reasoning_effort: str | None = None,
+    validator_llm: str | None = None,
+    validator_reasoning_effort: str | None = None,
+    validation_enabled: bool | None = None,
     trace_llm: bool = False,
     base_seed: int | None = None,
     configured_seed: int | None = None,
@@ -685,6 +715,23 @@ def run_batch_analysis(
     analysis_date = _validate_trade_date(analysis_date)
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Resolve + validate config once, up front, outside the per-ticker try/
+    # except below -- a validation_enabled-without-validator_llm
+    # misconfiguration (see fork README: "Generation / Validation / Review")
+    # must fail the whole batch immediately with one clear error, not repeat
+    # identically for every ticker in the loop.
+    build_headless_config(
+        depth_value, language, output_dir,
+        cli_deep_think_llm=deep_think_llm, cli_quick_think_llm=quick_think_llm,
+        cli_generation_llm=generation_llm, cli_review_llm=review_llm,
+        cli_quick_reasoning_effort=quick_reasoning_effort,
+        cli_deep_reasoning_effort=deep_reasoning_effort,
+        cli_generation_reasoning_effort=generation_reasoning_effort,
+        cli_review_reasoning_effort=review_reasoning_effort,
+        cli_validator_llm=validator_llm,
+        cli_validator_reasoning_effort=validator_reasoning_effort,
+        cli_validation_enabled=validation_enabled,
+    )
     results = []
     for index, ticker in enumerate(tickers, start=1):
         started = time.monotonic()
@@ -719,6 +766,9 @@ def run_batch_analysis(
                 deep_reasoning_effort=deep_reasoning_effort,
                 generation_reasoning_effort=generation_reasoning_effort,
                 review_reasoning_effort=review_reasoning_effort,
+                validator_llm=validator_llm,
+                validator_reasoning_effort=validator_reasoning_effort,
+                validation_enabled=validation_enabled,
                 trace_llm=trace_llm,
                 base_seed=base_seed,
                 configured_seed=configured_seed,
@@ -745,6 +795,13 @@ def run_batch_analysis(
                 if fallback_warnings
                 else ""
             )
+            validation = result.get("validation") or {}
+            validation_suffix = (
+                f" | validation: {validation['fail']} fail, "
+                f"{validation['unresolved']} unresolved"
+                if validation.get("checked") and (validation["fail"] or validation["unresolved"])
+                else ""
+            )
             progress(
                 f"[{index}/{len(tickers)}] {ticker} - completed in "
                 f"{format_duration(result['run_duration_seconds'])} | "
@@ -752,7 +809,7 @@ def run_batch_analysis(
                 f"tokens {stats['tokens_in']} in/{stats['tokens_out']} out | "
                 f"verifier {research['verification_status']} "
                 f"({research['verifier_passes']} pass(es), "
-                f"{research['repair_rounds']} repair(s)){fallback_suffix}"
+                f"{research['repair_rounds']} repair(s)){fallback_suffix}{validation_suffix}"
             )
         else:
             stage = result.get("failure_stage") or "unknown"

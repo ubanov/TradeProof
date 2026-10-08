@@ -60,6 +60,50 @@ def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
         return None
 
 
+def _invoke_structured_or_freetext(
+    structured_llm: Any | None,
+    plain_llm: Any,
+    prompt: Any,
+    render: Callable[[T], str],
+    agent_name: str,
+    *,
+    call_identity: str | None = None,
+    llm_role: str | None = None,
+) -> tuple[str, T | None]:
+    """Shared body for ``invoke_structured_or_freetext`` and
+    ``invoke_structured_or_freetext_parsed`` -- one implementation, two
+    return shapes, so neither duplicates the structured/fallback logic."""
+    if structured_llm is not None:
+        try:
+            result = traced_invoke(
+                structured_llm, prompt, attempt="structured",
+                call_identity=call_identity, llm_role=llm_role,
+            )
+            if result is None:
+                # A thinking model can answer in plain text instead of calling
+                # the tool, leaving the parser with nothing to return. Treat it
+                # as a structured miss and fall back, with a clear reason.
+                raise ValueError("structured output returned no parsed result")
+            record_structured_parse_result(
+                success=True,
+                parsed=result.model_dump(mode="json") if hasattr(result, "model_dump") else None,
+            )
+            return render(result), result
+        except Exception as exc:
+            record_structured_parse_result(success=False, error=str(exc))
+            warn_fallback(
+                logger,
+                f"{agent_name}: structured output unavailable; retrying once "
+                "with free-text fallback.",
+                detail=str(exc),
+            )
+
+    response = traced_invoke(
+        plain_llm, prompt, attempt="fallback", call_identity=call_identity, llm_role=llm_role,
+    )
+    return response.content, None
+
+
 def invoke_structured_or_freetext(
     structured_llm: Any | None,
     plain_llm: Any,
@@ -82,33 +126,33 @@ def invoke_structured_or_freetext(
     don't need to distinguish repeated calls at this same stage can omit it.
     ``llm_role`` ("generation"/"review", see fork README: "Model roles:
     Generation vs Review") is forwarded the same way, for trace observability.
-    """
-    if structured_llm is not None:
-        try:
-            result = traced_invoke(
-                structured_llm, prompt, attempt="structured",
-                call_identity=call_identity, llm_role=llm_role,
-            )
-            if result is None:
-                # A thinking model can answer in plain text instead of calling
-                # the tool, leaving the parser with nothing to return. Treat it
-                # as a structured miss and fall back, with a clear reason.
-                raise ValueError("structured output returned no parsed result")
-            record_structured_parse_result(
-                success=True,
-                parsed=result.model_dump(mode="json") if hasattr(result, "model_dump") else None,
-            )
-            return render(result)
-        except Exception as exc:
-            record_structured_parse_result(success=False, error=str(exc))
-            warn_fallback(
-                logger,
-                f"{agent_name}: structured output unavailable; retrying once "
-                "with free-text fallback.",
-                detail=str(exc),
-            )
 
-    response = traced_invoke(
-        plain_llm, prompt, attempt="fallback", call_identity=call_identity, llm_role=llm_role,
+    Callers that also need the parsed structured object (e.g. to run
+    Validator's deterministic field checks, see ``agents/validator.py``)
+    should use ``invoke_structured_or_freetext_parsed`` instead.
+    """
+    rendered, _parsed = _invoke_structured_or_freetext(
+        structured_llm, plain_llm, prompt, render, agent_name,
+        call_identity=call_identity, llm_role=llm_role,
     )
-    return response.content
+    return rendered
+
+
+def invoke_structured_or_freetext_parsed(
+    structured_llm: Any | None,
+    plain_llm: Any,
+    prompt: Any,
+    render: Callable[[T], str],
+    agent_name: str,
+    *,
+    call_identity: str | None = None,
+    llm_role: str | None = None,
+) -> tuple[str, T | None]:
+    """Identical to ``invoke_structured_or_freetext``, but also returns the
+    parsed structured object (``None`` on a free-text fallback) -- for a
+    caller that needs to run field-level deterministic checks (e.g. Trader's
+    entry/stop-loss direction check) without re-parsing the rendered text."""
+    return _invoke_structured_or_freetext(
+        structured_llm, plain_llm, prompt, render, agent_name,
+        call_identity=call_identity, llm_role=llm_role,
+    )

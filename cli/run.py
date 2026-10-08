@@ -30,7 +30,11 @@ from cli.stats_handler import StatsCallbackHandler
 from tradingagents.agents.fallback_log import fallback_count, reset_fallback_count
 from tradingagents.agents.rating import is_review
 from tradingagents.dataflows.symbols import safe_ticker_component
-from tradingagents.default_config import DEFAULT_CONFIG, resolve_role_config
+from tradingagents.default_config import (
+    DEFAULT_CONFIG,
+    resolve_role_config,
+    resolve_validation_config,
+)
 from tradingagents.graph.analyst_execution import (
     build_analyst_execution_plan,
 )
@@ -245,12 +249,27 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     config["anthropic_effort"] = selections.get("anthropic_effort")
     # Quick vs Deep reasoning effort (see fork README): per-role, independent
     # of which model each is set to. The interactive flow does not prompt for
-    # these (selections.get returns None, meaning no override), exactly like
-    # the three knobs above; the headless config builder sets them explicitly.
-    config["quick_reasoning_effort"] = selections.get("quick_reasoning_effort")
-    config["deep_reasoning_effort"] = selections.get("deep_reasoning_effort")
+    # these, unlike the three knobs above (selections has no such key) --
+    # fall back to DEFAULT_CONFIG's own (possibly env-sourced) value instead
+    # of unconditionally overwriting it with a bare None, so an interactive
+    # run doesn't silently drop a TRADINGAGENTS_*_REASONING_EFFORT env var.
+    # The headless config builder always sets these explicitly either way.
+    config["quick_reasoning_effort"] = selections.get("quick_reasoning_effort") or DEFAULT_CONFIG.get("quick_reasoning_effort")
+    config["deep_reasoning_effort"] = selections.get("deep_reasoning_effort") or DEFAULT_CONFIG.get("deep_reasoning_effort")
     config["generation_reasoning_effort"] = None
     config["review_reasoning_effort"] = None
+    # Validator role (see fork README: "Generation / Validation / Review") --
+    # no legacy name to resolve, so these are set directly (same
+    # fall-back-to-DEFAULT_CONFIG reasoning as above), not reset for a
+    # downstream resolver.
+    config["validator_llm"] = selections.get("validator_llm") or DEFAULT_CONFIG.get("validator_llm")
+    config["validator_reasoning_effort"] = (
+        selections.get("validator_reasoning_effort") or DEFAULT_CONFIG.get("validator_reasoning_effort")
+    )
+    validation_enabled = selections.get("validation_enabled")
+    config["validation_enabled"] = (
+        validation_enabled if validation_enabled is not None else DEFAULT_CONFIG.get("validation_enabled", False)
+    )
     config["output_language"] = selections.get("output_language", "English")
     # --checkpoint/--no-checkpoint overrides only when explicitly given; omitting
     # the flag preserves TRADINGAGENTS_CHECKPOINT_ENABLED / the default (#976).
@@ -358,6 +377,12 @@ def execute_analysis(
     # point -- CLI, interactive, or a bare dict a test constructs directly --
     # resolves the same way before anything below reads the canonical keys.
     config = resolve_role_config(config)
+    # Fails loudly here (before any client/graph construction) if
+    # validation_enabled is set without a validator_llm -- see fork README:
+    # "Generation / Validation / Review". A CLI caller also checks this
+    # earlier, for a friendlier message before even parsing tickers/dates;
+    # this is the safety net for any other caller (interactive, programmatic).
+    config = resolve_validation_config(config)
 
     # Per-ticker, not per-process: a batch run must not accumulate one running
     # total across every ticker it processes.

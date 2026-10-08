@@ -76,11 +76,20 @@ class GraphSetup:
         generation_llm: Any,
         review_llm: Any,
         conditional_logic: ConditionalLogic,
+        validator_llm: Any = None,
     ):
-        """Initialize with required components."""
+        """Initialize with required components.
+
+        ``validator_llm`` is ``None`` unless validation is enabled (see fork
+        README: "Generation / Validation / Review") -- the handful of
+        integrated stages (currently Trader and Portfolio Manager) treat a
+        ``None`` validator as "deterministic checks only, no Validator LLM
+        call", exactly like any other provider without a feature enabled.
+        """
         self.generation_llm = generation_llm
         self.review_llm = review_llm
         self.conditional_logic = conditional_logic
+        self.validator_llm = validator_llm
 
     def setup_graph(
         self, selected_analysts=("market", "social", "news", "fundamentals")
@@ -113,12 +122,18 @@ class GraphSetup:
         bull_repair_node = create_bull_repair(self.review_llm)
         bear_repair_node = create_bear_repair(self.review_llm)
         research_manager_node = create_research_manager(self.generation_llm)
-        trader_node = create_trader(self.generation_llm)
+        # Trader and Portfolio Manager are the two stages currently wired to
+        # the Validator (see fork README: "Generation / Validation / Review")
+        # -- their structured, decision-critical output is the clearest case
+        # for a bounded contract/arithmetic check before it reaches the next
+        # stage. validator_llm=None (validation not enabled) means
+        # deterministic checks still run, just no Validator LLM call.
+        trader_node = create_trader(self.generation_llm, validator_llm=self.validator_llm)
 
         aggressive_analyst = create_aggressive_debator(self.generation_llm, self.review_llm)
         neutral_analyst = create_neutral_debator(self.generation_llm, self.review_llm)
         conservative_analyst = create_conservative_debator(self.generation_llm, self.review_llm)
-        portfolio_manager_node = create_portfolio_manager(self.generation_llm)
+        portfolio_manager_node = create_portfolio_manager(self.generation_llm, validator_llm=self.validator_llm)
 
         workflow = StateGraph(AgentState)
 

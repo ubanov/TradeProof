@@ -205,6 +205,23 @@ def record_structured_parse_result(
     tracer.record_parse_result(call_dir, success=success, parsed=parsed, error=error)
 
 
+def record_validator_debug(fields: dict) -> None:
+    """Attach small, named debug fields to the last completed call (see
+    ``LLMTraceCallbackHandler.record_debug_fields``) -- used by the Validator
+    to record which parse path succeeded (structured/json_fallback/
+    limited_recovery) and which LLM findings were dropped by the
+    deterministic post-filter, and why. No-op when trace mode is off or
+    there is no pending call, exactly like ``record_structured_parse_result``.
+    """
+    tracer = _active_tracer.get()
+    if tracer is None:
+        return
+    call_dir = _last_call_dir.get()
+    if call_dir is None:
+        return
+    tracer.record_debug_fields(call_dir, fields)
+
+
 # ---------------------------------------------------------------------------
 # Secret redaction
 # ---------------------------------------------------------------------------
@@ -625,6 +642,19 @@ class LLMTraceCallbackHandler(BaseCallbackHandler):
             existing["structured_parse_status"] = "failed"
             existing["structured_parse_error"] = (error or "")[:500]
             _safe_write_json(meta_path, existing, self._warn)
+
+    def record_debug_fields(self, call_dir: Path, fields: dict) -> None:
+        """Merge small, named debug fields into a call's ``metadata.json`` --
+        generic counterpart to ``record_parse_result`` for callers (today:
+        the Validator, see ``agents/validator.py``) that need a few extra
+        named booleans/lists on a specific call without a bespoke schema."""
+        meta_path = call_dir / "metadata.json"
+        try:
+            existing = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        existing.update(fields)
+        _safe_write_json(meta_path, existing, self._warn)
 
     # -- aggregate summary ----------------------------------------------------
 
