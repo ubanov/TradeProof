@@ -522,12 +522,24 @@ same contract/format. The result is rechecked once; if still FAIL, it is
 recorded as unresolved and the pipeline continues — never a second repair,
 never a loop.
 
-**Where it's wired today**: Trader and Portfolio Manager — their structured,
-decision-critical output is the clearest case for this first pass. Analyst
-reports, Bull/Bear theses and reviews, Research Verifier, Research Manager,
-and Risk's independent/cross-review assessments are deliberately **not**
-validated yet; extending Validator's deterministic-only or full coverage to
-those stages is future work, not a limitation of the central infrastructure
+**Where it's wired today**: Research Manager, Trader, and Portfolio Manager —
+decision-critical/synthesis stages where an objective contract/arithmetic
+error has a clear, bounded fix. Research Manager's deterministic layer
+reuses the existing [Research Manager integrity check](#research-manager-integrity-check)
+as-is; its evidence context mirrors exactly what the Manager's own prompt
+shows it (Bull/Bear initial theses, review outcomes, verification summary,
+repair outputs, final Bull/Bear positions, deterministic trade metrics) --
+**never** the raw analyst reports, which the Manager's own prompt never
+shows it either. Validator detects objective synthesis/contract errors the
+Manager itself might introduce (an invented price target, a reward/risk
+arithmetic mismatch, a self-assessed conviction score stated as a market
+probability); it is explicitly **not** a second Research Verifier and does
+not re-litigate which side of the Bull/Bear debate was stronger -- that
+stays the Research Verifier's and Research Manager's own job. Analyst
+reports, Bull/Bear theses and reviews, Research Verifier, and Risk's
+independent/cross-review assessments are deliberately **not** validated yet;
+extending Validator's deterministic-only or full coverage to those stages is
+future work, not a limitation of the central infrastructure
 (`tradingagents/agents/validator.py`, `validator_deterministic.py`,
 `validation_schemas.py`), which is stage-agnostic.
 

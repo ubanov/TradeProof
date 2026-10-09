@@ -267,6 +267,14 @@ def run_non_interactive(
             f"fail: {validation['fail']} / repairs: {validation['repairs']} / "
             f"unresolved: {validation['unresolved']}"
         )
+        # A real "initial FAIL -> repaired -> final PASS" cycle leaves
+        # fail/unresolved at 0 above (those reflect the FINAL status only)
+        # -- surface it here so it isn't invisible in the terminal summary.
+        if validation.get("initial_failures"):
+            echo(
+                f"  initial failures: {validation['initial_failures']} / "
+                f"repairs succeeded: {validation['repairs_succeeded']}"
+            )
 
 
 @app.command("batch")

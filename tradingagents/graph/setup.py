@@ -121,13 +121,14 @@ class GraphSetup:
         research_verifier_node = create_research_verifier(self.review_llm)
         bull_repair_node = create_bull_repair(self.review_llm)
         bear_repair_node = create_bear_repair(self.review_llm)
-        research_manager_node = create_research_manager(self.generation_llm)
-        # Trader and Portfolio Manager are the two stages currently wired to
-        # the Validator (see fork README: "Generation / Validation / Review")
-        # -- their structured, decision-critical output is the clearest case
-        # for a bounded contract/arithmetic check before it reaches the next
-        # stage. validator_llm=None (validation not enabled) means
-        # deterministic checks still run, just no Validator LLM call.
+        # Research Manager, Trader, and Portfolio Manager are the stages
+        # currently wired to the Validator (see fork README: "Generation /
+        # Validation / Review") -- their structured, decision-critical/
+        # synthesis output is the clearest case for a bounded contract/
+        # arithmetic check before it reaches the next stage. validator_llm=
+        # None (validation not enabled) means deterministic checks still
+        # run, just no Validator LLM call.
+        research_manager_node = create_research_manager(self.generation_llm, validator_llm=self.validator_llm)
         trader_node = create_trader(self.generation_llm, validator_llm=self.validator_llm)
 
         aggressive_analyst = create_aggressive_debator(self.generation_llm, self.review_llm)

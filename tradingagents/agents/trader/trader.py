@@ -132,8 +132,14 @@ def create_trader(generation_llm, validator_llm=None):
             # Trader's own legitimately-cited price-structure numbers (current
             # price, SMA/EMA, RSI, ...) as UNSUPPORTED_NUMBER simply because
             # its own evidence window was narrower than the Trader's.
+            # Instrument identity (ticker + resolved company name) is also
+            # rendered into the real prompt (see trader/user.txt's
+            # {instrument_context}) -- omitting it here risks the same false
+            # UNKNOWN_USED_AS_FACT-on-the-ticker regression caught on
+            # Portfolio Manager.
             evidence_context=(
-                (f"Technical market report:\n{market_report}\n\n" if market_report else "")
+                f"Instrument identity:\n{instrument_context}\n\n"
+                + (f"Technical market report:\n{market_report}\n\n" if market_report else "")
                 + f"Portfolio context:\n{portfolio_context}\n\n"
                 f"Investment plan:\n{investment_plan}\n\n"
                 f"Research trade plan:\n{research_trade_plan}"

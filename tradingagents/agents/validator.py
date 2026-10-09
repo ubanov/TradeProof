@@ -72,13 +72,18 @@ class ValidationOutcome:
     """Everything a caller needs for observability, plus the (possibly
     repaired) content to actually use going forward."""
 
-    status: str  # ValidationStatus value (PASS/WARN/FAIL)
+    status: str  # ValidationStatus value (PASS/WARN/FAIL) -- the FINAL status
     findings: list[dict] = field(default_factory=list)
     repair_attempted: bool = False
     repair_succeeded: bool = False
     final_text: str = ""
     final_parsed: BaseModel | None = None
     llm_calls: int = 0
+    # The status BEFORE any repair -- equal to `status` whenever no repair
+    # was attempted. Kept separately so a real "initial FAIL -> repaired ->
+    # final PASS" cycle stays visible in the summary even though the FINAL
+    # status alone (what `fail`/`unresolved` count) would show PASS.
+    initial_status: str = ""
 
     def as_log_entry(self, stage: str) -> dict:
         """Compact dict for AgentState's ``validation_log`` -- see fork
@@ -87,6 +92,7 @@ class ValidationOutcome:
         return {
             "stage": stage,
             "status": self.status,
+            "initial_status": self.initial_status or self.status,
             "finding_count": len(self.findings),
             "categories": sorted({f["category"] for f in self.findings}),
             "repair_attempted": self.repair_attempted,
@@ -187,6 +193,19 @@ _MAX_RECOVERY_TEXT_LEN = 2000
 _MAX_REASON_LINE_LEN = 300
 _MAX_REASON_LINES = 10
 
+# A line like "category: ARITHMETIC_ERROR" or "- claim: ...\" (after bullet-
+# prefix stripping) is a YAML-ish finding FIELD, not a short reason -- a
+# structured multi-field finding (category/claim/evidence/reason/
+# suggested_correction/severity, each its own key) must never be fragmented
+# into one UNCLASSIFIED_VALIDATION_ERROR finding per line (real-world
+# regression: a single structured finding became seven). Any such line means
+# this response needs real YAML/JSON structure-awareness this mechanical
+# recovery deliberately doesn't have -- refuse outright and let the
+# normalization fallback (which DOES understand structure, via the model
+# converting its own prior answer to JSON) handle it instead.
+_FINDING_FIELD_KEYS = ("category", "claim", "evidence", "reason", "suggested_correction", "severity")
+_FIELD_KEY_LINE_RE = re.compile(r"(?i)^(?:" + "|".join(_FINDING_FIELD_KEYS) + r")\s*:")
+
 
 def _limited_validator_recovery(text: str) -> ValidationResult | None:
     """Returns ``None`` (never raises) the moment anything is ambiguous --
@@ -216,6 +235,11 @@ def _limited_validator_recovery(text: str) -> ValidationResult | None:
                 return None
             continue
         reason = _BULLET_PREFIX_RE.sub("", line).strip()
+        if _FIELD_KEY_LINE_RE.match(reason):
+            # A structured, multi-field finding (YAML/mapping-shaped) --
+            # too much structure for this mechanical recovery; refuse so the
+            # normalization fallback handles it instead of fragmenting it.
+            return None
         if reason:
             reason_lines.append(reason)
 
@@ -253,13 +277,52 @@ def _limited_validator_recovery(text: str) -> ValidationResult | None:
     return ValidationResult(status=ValidationStatus.FAIL, findings=findings)
 
 
+def _sanitize_validation_payload(payload: dict) -> dict:
+    """Syntactic-only null sanitization, NEVER semantic (see task: "NORMALIZER
+    PIERDE FINDINGS VALIDOS POR CAMPOS NULL"). A model (notably a
+    normalize-only retry) sometimes writes an explicit JSON ``null`` for an
+    optional/auxiliary finding field that the schema itself already treats
+    as empty by default -- ``suggested_correction``/``reason``/``claim``
+    default to ``""``, ``evidence`` defaults to ``[]`` -- so rejecting the
+    whole otherwise-valid finding over that null is unnecessarily fragile.
+    Converts null to that SAME already-defined empty equivalent for exactly
+    those fields; never touches ``category`` or the top-level ``status``
+    (no safe empty equivalent exists for either -- a null there must keep
+    failing validation conservatively, never be guessed at), never invents
+    text, and never touches anything this function doesn't explicitly name.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        return payload
+    sanitized_findings = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            sanitized_findings.append(finding)
+            continue
+        finding = dict(finding)  # never mutate the caller's own dict
+        for key in ("claim", "reason", "suggested_correction"):
+            if finding.get(key) is None and key in finding:
+                finding[key] = ""
+        if finding.get("evidence") is None and "evidence" in finding:
+            finding["evidence"] = []
+        sanitized_findings.append(finding)
+    return {**payload, "findings": sanitized_findings}
+
+
 def _try_json_parse(text: str) -> ValidationResult | None:
     """Direct JSON/schema parse only, no new LLM call -- shared by the
     same-attempt recovery below and by the (separate) normalize-call parse."""
     try:
         payload = json.loads(_normalize_dollar_escape(text))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(payload, dict):
+        payload = _sanitize_validation_payload(payload)
+    try:
         return ValidationResult.model_validate(payload)
-    except (json.JSONDecodeError, TypeError, ValidationError):
+    except ValidationError:
         return None
 
 
@@ -643,7 +706,7 @@ def validate_and_repair(
     if status != ValidationStatus.FAIL.value or validator_llm is None:
         return ValidationOutcome(
             status=status, findings=findings, final_text=candidate_text,
-            final_parsed=candidate_parsed, llm_calls=llm_calls,
+            final_parsed=candidate_parsed, llm_calls=llm_calls, initial_status=status,
         )
 
     # Visible only on FAIL/repair -- never one line per PASS (see fork
@@ -690,6 +753,7 @@ def validate_and_repair(
         status=final_status, findings=final_findings, repair_attempted=True,
         repair_succeeded=final_status != ValidationStatus.FAIL.value,
         final_text=final_text, final_parsed=repaired_parsed, llm_calls=llm_calls,
+        initial_status=status,
     )
 
 
@@ -698,7 +762,13 @@ def summarize_validation_log(validation_log: list[dict]) -> dict:
     fork README: "Generation / Validation / Review") -- used by both the
     saved report and the CLI/batch summary line, so neither recomputes this
     differently. ``unresolved`` is a stage still FAIL after its one repair
-    attempt (or FAIL with no repair possible, e.g. no ``validator_llm``)."""
+    attempt (or FAIL with no repair possible, e.g. no ``validator_llm``).
+
+    ``fail``/``unresolved`` alone hide a real "initial FAIL -> repaired ->
+    final PASS" cycle (the final status is PASS, so neither counts it) --
+    ``initial_failures``/``repairs_attempted``/``repairs_succeeded``/
+    ``final_unresolved`` make that visible without changing what the
+    existing fields mean, for any caller already consuming them."""
     checked = len(validation_log)
     passed = sum(1 for e in validation_log if e["status"] == ValidationStatus.PASS.value)
     warned = sum(1 for e in validation_log if e["status"] == ValidationStatus.WARN.value)
@@ -709,6 +779,13 @@ def summarize_validation_log(validation_log: list[dict]) -> dict:
         if e["status"] == ValidationStatus.FAIL.value and not e["repair_succeeded"]
     )
     llm_calls = sum(e.get("llm_calls", 0) for e in validation_log)
+    initial_failures = sum(
+        1 for e in validation_log
+        if e.get("initial_status", e["status"]) == ValidationStatus.FAIL.value
+    )
+    repairs_succeeded = sum(
+        1 for e in validation_log if e["repair_attempted"] and e["repair_succeeded"]
+    )
     return {
         "checked": checked,
         "pass": passed,
@@ -717,6 +794,10 @@ def summarize_validation_log(validation_log: list[dict]) -> dict:
         "repairs": repairs,
         "unresolved": unresolved,
         "llm_calls": llm_calls,
+        "initial_failures": initial_failures,
+        "repairs_attempted": repairs,
+        "repairs_succeeded": repairs_succeeded,
+        "final_unresolved": unresolved,
     }
 
 
@@ -733,6 +814,12 @@ def render_validation_summary(validation_log: list[dict]) -> str:
             f"- Stages checked: {counts['checked']} / pass: {counts['pass']} / "
             f"warn: {counts['warn']} / fail: {counts['fail']} / "
             f"repairs: {counts['repairs']} / unresolved: {counts['unresolved']}"
+        ),
+        (
+            f"- Initial failures: {counts['initial_failures']} / "
+            f"repairs attempted: {counts['repairs_attempted']} / "
+            f"repairs succeeded: {counts['repairs_succeeded']} / "
+            f"final unresolved: {counts['final_unresolved']}"
         ),
     ]
     unresolved_entries = [

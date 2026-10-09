@@ -212,20 +212,69 @@ once, rechecks once, and returns.
 
 | Stage | Deterministic | Validator LLM |
 |---|---|---|
+| Research Manager | Yes (reuses `managers/integrity_check.py::check_manager_integrity`) | Yes, when enabled |
 | Trader | Yes (relational/unit + entry/stop direction) | Yes, when enabled |
 | Portfolio Manager | Yes (relational/unit) | Yes, when enabled |
 | Market / Sentiment / News / Fundamentals Analyst | Not yet wired | Not yet wired |
 | Bull / Bear initial thesis and review | Not yet wired | Not yet wired |
 | Research Verifier | Not yet wired | Not yet wired |
-| Research Manager | Not yet wired | Not yet wired |
 | Risk independent / cross-review | Not yet wired | Not yet wired |
 
-Trader and Portfolio Manager were chosen for this first pass as the clearest
-decision-critical, structured outputs. The central infrastructure
+Research Manager, Trader, and Portfolio Manager were chosen as the clearest
+decision-critical/synthesis, structured outputs. The central infrastructure
 (`agents/validator.py`, `validator_deterministic.py`, `validation_schemas.
 py`) is stage-agnostic and reusable; extending coverage to the remaining
 stages — likely deterministic-only for the four analyst reports, given their
 free-text shape — is future work, not a limitation of the design.
+
+**Research Manager's deterministic check is an adapter, not a new check**:
+`validator_deterministic.py::check_manager_integrity_findings(text, debate,
+*, extra_sources=())` calls the EXISTING `check_manager_integrity` and maps
+its categories onto `ValidationCategory` (`NEW_UNSUPPORTED_THRESHOLD`/
+`NEW_UNSUPPORTED_LEVEL`/`UNSUPPORTED_SIZING_RULE`/`WITHDRAWN_VALUE_REUSED` →
+`UNSUPPORTED_NUMBER`; `ARITHMETIC_ERROR`/`RELATIONAL_ERROR` → themselves;
+`CONVICTION_AS_PROBABILITY` → `PROMPT_REQUIREMENT_VIOLATION`). That existing
+check's own "known-good number pool" already distinguishes a number the
+Manager legitimately inherited from one it invented -- Validator does not
+re-implement that distinction, it just reuses the result (`build_known_
+number_pool`, unchanged, still combines Bull/Bear's structured thesis entry/
+take-profit/stop-loss and deterministic trade metrics with whatever free-text
+sources it's given).
+
+**This adapter deliberately takes no raw analyst `reports` parameter at
+all** -- an earlier version of this integration passed the raw market/
+sentiment/news/fundamentals reports into the shared pool, which meant a
+number known only from a report Research Manager's own prompt never showed
+it (e.g. a price level only in the market report) was wrongly treated as
+"supported" the moment Research Manager happened to invent that exact
+number -- a real provenance leak, caught and fixed. `build_known_number_
+pool`/`check_manager_integrity` instead gained an optional, additive
+`extra_sources: tuple[str, ...] = ()` keyword (defaulting to a no-op, so
+`check_manager_integrity`'s own pre-existing call site -- which still feeds
+the Trader-facing integrity notice with the full raw reports, by design,
+since that notice's own purpose is different -- is completely unaffected).
+Research Manager's Validator adapter passes its OWN allowed-evidence
+universe as `extra_sources`: Bull/Bear initial theses, review outcomes,
+verification summary, repair outputs, final Bull/Bear positions -- exactly
+what that prompt renders, scanned with the same `extract_numbers` call
+`reports` already used, never a new extraction method. Validator's own
+`evidence_context` (for the Validator LLM and the UNSUPPORTED_NUMBER/
+UNKNOWN_USED_AS_FACT post-filter) mirrors this same universe -- never the
+raw analyst reports, and never the candidate text itself.
+
+Research Manager's integrity check now runs TWICE in the node, by design:
+once inside Validator's `deterministic_check_fn` (on the pre-repair
+candidate, and again on the repaired text during the recheck -- it must see
+whatever text it's actually asked about), and once more, unchanged from
+before this integration, on the FINAL (possibly repaired) plan to build the
+`manager_integrity_status`/`manager_integrity_findings` state that feeds the
+Trader-facing integrity notice. Both calls are the same pure, deterministic,
+side-effect-free function; running it twice is not "duplicated logic" --
+reimplementing its number-pool/arithmetic/relational scanning a second time
+would be. Reordering this second call to run on the POST-repair text (it
+used to run on the pre-repair candidate, before Validator existed) ensures
+the Trader never sees an integrity notice describing a plan that was since
+corrected.
 
 ### 3.6 JSON/schema repair (separate, narrow, not yet wired)
 
@@ -433,13 +482,28 @@ manifest consumer). `trace_summary.json` mirrors the same pair under
 keys).
 
 The saved report's "Validation" section (`agents/validator.py::
-render_validation_summary`) gives one compact line — stages checked / pass /
-warn / fail / repairs / unresolved — plus detail for unresolved findings
+render_validation_summary`) gives two compact lines — stages checked / pass /
+warn / fail / repairs / unresolved, and initial failures / repairs attempted
+/ repairs succeeded / final unresolved — plus detail for unresolved findings
 only, never a per-stage dump of every PASS. `AgentState.validation_log` holds
-the same compact per-stage entries (status, finding count, categories,
-repair attempted/succeeded, LLM call count) that feed it — never the full
-findings' evidence payloads or a copy of the candidate text, so it stays
-small regardless of how many stages are validated.
+the same compact per-stage entries (status, **initial status** -- the status
+before any repair, finding count, categories, repair attempted/succeeded,
+LLM call count) that feed it — never the full findings' evidence payloads or
+a copy of the candidate text, so it stays small regardless of how many
+stages are validated.
+
+`status`/`fail`/`unresolved` alone describe the FINAL outcome, so a real
+"initial FAIL → one bounded repair → final PASS" cycle (confirmed against
+real runs: a Portfolio Manager arithmetic error, `1157.08 - 1152.56 = 4.48`
+flagged and corrected to `4.52`, recheck PASS) reads as zero fails — correct,
+but it hides that Validator caught something real. `summarize_validation_log`
+(`agents/validator.py`) therefore also reports `initial_failures` (stages
+whose FIRST validation result was FAIL), `repairs_attempted`/
+`repairs_succeeded` (aliases of the existing `repairs` count and a new
+repair-outcome count, respectively), and `final_unresolved` (alias of the
+existing `unresolved`) — added alongside the original fields, which keep
+their exact original meaning for any existing caller (e.g. `result.json`'s
+`"validation"` key, which is this same dict).
 
 ## 11. Backward compatibility
 
@@ -464,7 +528,8 @@ small regardless of how many stages are validated.
   is ever made, and -- corrected after real-run testing surfaced this as a
   bug, not a documented trade-off -- **no repair is ever triggered either**,
   regardless of what the (always-on, cheap) deterministic checks find.
-  Trader and Portfolio Manager's deterministic checks (relational/unit, and
+  Research Manager, Trader, and Portfolio Manager's deterministic checks
+  (the reused Research Manager integrity check; relational/unit, and
   entry/stop direction for Trader) still run and are still recorded in
   `validation_log` for observability with validation disabled, but a
   deterministic FAIL in that state is observability-only: it never calls

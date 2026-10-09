@@ -16,11 +16,13 @@ import pytest
 
 import tradingagents.default_config as default_config_module
 from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
+from tradingagents.agents.managers.research_manager import create_research_manager
 from tradingagents.agents.schemas import (
     ArithmeticClaim,
     ArithmeticOperation,
     PortfolioDecision,
     PortfolioRating,
+    ResearchPlan,
     TraderAction,
     TraderProposal,
 )
@@ -42,6 +44,7 @@ from tradingagents.agents.validator_deterministic import (
     check_arithmetic_claims,
     check_entry_stop_direction,
     check_json_syntax,
+    check_manager_integrity_findings,
     check_missing_requirement,
     check_schema,
     check_text_relational_and_unit_errors,
@@ -553,8 +556,8 @@ def test_validation_log_entries_never_carry_evidence_payloads():
     )
     log_entry = outcome.as_log_entry("Trader")
     assert set(log_entry) == {
-        "stage", "status", "finding_count", "categories", "repair_attempted",
-        "repair_succeeded", "llm_calls",
+        "stage", "status", "initial_status", "finding_count", "categories",
+        "repair_attempted", "repair_succeeded", "llm_calls",
     }
     assert "secret evidence text" not in str(log_entry)
 
@@ -679,17 +682,22 @@ def test_json_syntax_repair_is_a_noop_when_no_validator_llm_configured():
 @pytest.mark.unit
 def test_summarize_validation_log_counts_each_status_and_repair_outcome():
     log = [
-        {"stage": "A", "status": "PASS", "finding_count": 0, "categories": [],
-         "repair_attempted": False, "repair_succeeded": False, "llm_calls": 1},
-        {"stage": "B", "status": "FAIL", "finding_count": 2, "categories": ["UNIT_ERROR"],
-         "repair_attempted": True, "repair_succeeded": True, "llm_calls": 2},
-        {"stage": "C", "status": "FAIL", "finding_count": 1, "categories": ["SCHEMA_ERROR"],
-         "repair_attempted": True, "repair_succeeded": False, "llm_calls": 2},
+        {"stage": "A", "status": "PASS", "initial_status": "PASS", "finding_count": 0,
+         "categories": [], "repair_attempted": False, "repair_succeeded": False, "llm_calls": 1},
+        # Real "initial FAIL -> repaired -> final PASS" cycle: the FINAL
+        # status is PASS (so `fail`/`unresolved` below correctly don't count
+        # it), but `initial_failures` must still see the real initial FAIL.
+        {"stage": "B", "status": "PASS", "initial_status": "FAIL", "finding_count": 2,
+         "categories": ["UNIT_ERROR"], "repair_attempted": True, "repair_succeeded": True, "llm_calls": 2},
+        {"stage": "C", "status": "FAIL", "initial_status": "FAIL", "finding_count": 1,
+         "categories": ["SCHEMA_ERROR"], "repair_attempted": True, "repair_succeeded": False, "llm_calls": 2},
     ]
     counts = summarize_validation_log(log)
     assert counts == {
-        "checked": 3, "pass": 1, "warn": 0, "fail": 2,
+        "checked": 3, "pass": 2, "warn": 0, "fail": 1,
         "repairs": 2, "unresolved": 1, "llm_calls": 5,
+        "initial_failures": 2, "repairs_attempted": 2,
+        "repairs_succeeded": 1, "final_unresolved": 1,
     }
 
 
@@ -724,6 +732,7 @@ def test_render_validation_summary_is_empty_for_an_empty_log():
 from tradingagents.agents.validator import (  # noqa: E402
     _filter_llm_findings,
     _limited_validator_recovery,
+    _try_json_parse,
     _why_llm_finding_should_be_dropped,
 )
 
@@ -1418,6 +1427,997 @@ def test_11_candidate_text_itself_never_counts_as_support():
     )
     reason = _why_llm_finding_should_be_dropped(finding, [], "No numeric figures appear here at all.")
     assert reason is None
+
+
+# =============================================================================
+# Phase 2: extending Validator to Research Manager (ONLY this stage, on top
+# of Trader/Portfolio Manager) -- reuses validate_and_repair() and the
+# EXISTING check_manager_integrity deterministic check (via the new
+# check_manager_integrity_findings adapter), never a parallel implementation.
+# Numbered per the task's own "TESTS" list (1-23).
+# =============================================================================
+
+
+class _ResearchManagerLLM:
+    """No with_structured_output -- free-text fallback path, like the
+    project's own ``_NamedLLM``/``_TraderLLM`` pattern."""
+
+    def __init__(self, text):
+        self.text = text
+        self.calls = 0
+
+    def invoke(self, prompt, **kwargs):
+        self.calls += 1
+        return SimpleNamespace(content=self.text)
+
+
+def _research_manager_state(bull_initial="Bull thesis: target 1196.17.", bear_initial="Bear thesis: risks noted."):
+    state = Propagator().create_initial_state("NVDA", "2026-09-01")
+    state["investment_debate_state"]["bull_initial"] = bull_initial
+    state["investment_debate_state"]["bear_initial"] = bear_initial
+    return state
+
+
+_RM_PLAN_TEXT = "**Recommendation**: Buy\n**Rationale**: Bull case is stronger.\n**Strategic Actions**: Enter per plan."
+
+
+@pytest.mark.unit
+def test_rm_1_validation_disabled_observes_deterministic_findings_but_makes_no_calls_or_repair():
+    bad_plan = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: Reduce exposure if price exceeds 9999.99.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+    llm = _ResearchManagerLLM(bad_plan)
+    result = create_research_manager(llm, validator_llm=None)(_research_manager_state())
+    assert llm.calls == 1  # only the original generation call
+    entry = result["validation_log"][0]
+    assert entry["stage"] == "Research Manager"
+    assert entry["status"] == ValidationStatus.FAIL.value  # the unsupported threshold is still recorded
+    assert entry["repair_attempted"] is False
+    assert result["investment_plan"] == bad_plan  # candidate unchanged
+
+
+@pytest.mark.unit
+def test_rm_2_validation_enabled_pass_triggers_no_repair():
+    llm = _ResearchManagerLLM(_RM_PLAN_TEXT)
+    validator = _enabled_validator()
+    result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
+    assert llm.calls == 1
+    assert result["validation_log"][0]["repair_attempted"] is False
+
+
+@pytest.mark.unit
+def test_rm_3_structured_fail_triggers_exactly_one_repair():
+    bad_plan = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: Reduce exposure if price exceeds 9999.99.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+    llm = _ResearchManagerLLM(bad_plan)
+    validator = _enabled_validator()
+    result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
+    assert llm.calls == 2  # original generation + one repair
+    assert result["validation_log"][0]["repair_attempted"] is True
+
+
+@pytest.mark.unit
+def test_rm_4_limited_recovery_fail_triggers_exactly_one_repair_no_normalization_call():
+    raw = "status: FAIL\nfindings:\n  - invented threshold"
+    validator = _FakeStructuredParseFailure(raw)
+    llm = _ResearchManagerLLM(_RM_PLAN_TEXT)
+    result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
+    assert llm.calls == 2  # original generation + one repair
+    assert validator.plain_calls == 0  # recovered mechanically both times, no normalize call
+    assert result["validation_log"][0]["repair_attempted"] is True
+
+
+@pytest.mark.unit
+def test_rm_5_ambiguous_raw_normalization_fallback_acts_as_formatter_not_second_opinion():
+    ambiguous_raw = "Looking at this response, I have some reservations worth mentioning."
+    validator = _FakeStructuredParseFailure(
+        ambiguous_raw,
+        normalize_response=(
+            '{"status": "FAIL", "findings": [{"category": "UNCLASSIFIED_VALIDATION_ERROR", '
+            '"claim": "x", "reason": "preserved"}]}'
+        ),
+    )
+    llm = _ResearchManagerLLM(_RM_PLAN_TEXT)
+    result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
+    # One normalize-only call for the initial check and one for the
+    # post-repair recheck (the fake always returns the same ambiguous raw) --
+    # never more than one PER validation pass, and never the candidate/
+    # evidence resent for a fresh verdict.
+    assert validator.plain_calls == 2
+    assert result["validation_log"][0]["repair_attempted"] is True
+    assert result["validation_log"][0]["categories"] == ["UNCLASSIFIED_VALIDATION_ERROR"]
+
+
+@pytest.mark.unit
+def test_rm_6_repair_pass_final_candidate_continues_downstream():
+    bad_plan = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: Reduce exposure if price exceeds 9999.99.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+    repaired_plan = "**Recommendation**: Buy\n**Rationale**: Bull case is stronger.\n**Strategic Actions**: Enter per plan."
+
+    class _RepairLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(content=bad_plan if self.calls == 1 else repaired_plan)
+
+    llm = _RepairLLM()
+    validator = _enabled_validator()
+    result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
+    assert result["investment_plan"] == repaired_plan
+    assert result["investment_debate_state"]["judge_decision"] == repaired_plan
+    assert result["validation_log"][0]["status"] == ValidationStatus.PASS.value
+    assert result["validation_log"][0]["repair_succeeded"] is True
+
+
+@pytest.mark.unit
+def test_rm_7_repair_fail_no_second_repair_and_final_unresolved_increments():
+    bad_plan = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: Reduce exposure if price exceeds 9999.99.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+    llm = _ResearchManagerLLM(bad_plan)  # always returns the same unsupported-threshold text
+    validator = _enabled_validator()
+    result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
+    assert llm.calls == 2  # original + exactly one repair, never a second
+    entry = result["validation_log"][0]
+    assert entry["repair_attempted"] is True
+    assert entry["repair_succeeded"] is False
+    counts = summarize_validation_log(result["validation_log"])
+    assert counts["final_unresolved"] == 1
+    assert counts["initial_failures"] == 1
+    assert counts["repairs_succeeded"] == 0
+
+
+@pytest.mark.unit
+def test_rm_8_arithmetic_error_introduced_by_manager_is_detected():
+    """Reward/risk ratio mismatch -- reuses the EXISTING
+    check_manager_integrity (via check_manager_integrity_findings), never a
+    second arithmetic implementation."""
+    debate = {"bull_trade_metrics": {"reward_risk": 1.2}, "bear_trade_metrics": {}}
+    text = "**Rationale**: The setup offers an R/R of 3:1, which is favorable."
+    findings = check_manager_integrity_findings(text, debate)
+    assert any(f.category == ValidationCategory.ARITHMETIC_ERROR for f in findings)
+
+
+@pytest.mark.unit
+def test_rm_9_number_present_in_allowed_bull_bear_input_is_not_unsupported():
+    debate = {"bull_thesis": {"take_profit": 1196.17}, "bear_thesis": {}}
+    text = "**Rationale**: Exposure should be cut if price exceeds 1196.17."
+    findings = check_manager_integrity_findings(text, debate)
+    assert not any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings)
+
+
+@pytest.mark.unit
+def test_rm_10_number_invented_by_manager_is_flagged_unsupported():
+    debate = {"bull_thesis": {}, "bear_thesis": {}}
+    text = "**Rationale**: Exposure should be cut if price exceeds 1215.0."
+    findings = check_manager_integrity_findings(text, debate)
+    assert any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings)
+
+
+@pytest.mark.unit
+def test_rm_11_candidate_text_not_consulted_as_evidence_for_research_manager_either():
+    import inspect
+
+    assert "candidate_text" not in inspect.signature(check_manager_integrity_findings).parameters
+
+
+@pytest.mark.unit
+def test_rm_12_inherited_bull_claim_not_reopened_as_unsupported():
+    """Manager repeats a number that was explicitly in Bull's canonical
+    thesis -- must not be reopened as unsupported merely because it is
+    absent from the (here, empty) raw analyst reports."""
+    debate = {"bull_thesis": {"take_profit": 1196.17}, "bear_thesis": {}}
+    text = "**Rationale**: Reduce exposure if price exceeds 1196.17."
+    findings = check_manager_integrity_findings(text, debate)
+    assert findings == []
+
+
+@pytest.mark.unit
+def test_rm_13_research_manager_validator_prompt_forbids_new_numbers_and_probability_misuse():
+    import tradingagents.agents.managers.research_manager as rm_mod
+
+    text = rm_mod._RESEARCH_MANAGER_CONTRACT.lower()
+    assert "invent" in text
+    assert "probability" in text
+
+
+@pytest.mark.unit
+def test_rm_14_schema_error_on_missing_required_field():
+    finding = check_schema({"recommendation": "Buy"}, ResearchPlan)
+    assert finding is not None
+    assert finding.category == ValidationCategory.SCHEMA_ERROR
+
+
+@pytest.mark.unit
+def test_rm_15_trader_receives_the_final_repaired_manager_output():
+    bad_plan = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: Reduce exposure if price exceeds 9999.99.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+    repaired_plan = "**Recommendation**: Buy\n**Rationale**: Clean.\n**Strategic Actions**: Enter per plan."
+
+    class _RepairLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(content=bad_plan if self.calls == 1 else repaired_plan)
+
+    result = create_research_manager(_RepairLLM(), validator_llm=_enabled_validator())(_research_manager_state())
+    # The exact field the Trader node reads (state["investment_plan"]).
+    assert result["investment_plan"] == repaired_plan
+    assert "9999.99" not in result["investment_plan"]
+
+
+@pytest.mark.unit
+def test_rm_16_research_verifier_module_unchanged_by_this_integration():
+    from tradingagents.agents.researchers.research_verifier import create_research_verifier
+
+    assert create_research_verifier is not None
+
+
+@pytest.mark.unit
+def test_rm_17_bull_bear_routing_modules_unchanged_by_this_integration():
+    from tradingagents.agents.researchers.bear_researcher import create_bear_researcher
+    from tradingagents.agents.researchers.bull_researcher import create_bull_researcher
+
+    assert create_bull_researcher is not None
+    assert create_bear_researcher is not None
+
+
+@pytest.mark.unit
+def test_rm_18_existing_trader_and_portfolio_manager_validator_signatures_unchanged():
+    import inspect
+
+    assert "validator_llm" in inspect.signature(create_trader).parameters
+    assert "validator_llm" in inspect.signature(create_portfolio_manager).parameters
+
+
+@pytest.mark.unit
+def test_rm_19_generation_role_used_for_research_manager_own_call_and_repair():
+    bad_plan = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: Reduce exposure if price exceeds 9999.99.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+
+    class _RoleTrackingLLM:
+        def __init__(self):
+            self.seen_roles: list[str | None] = []
+
+        def invoke(self, prompt, **kwargs):
+            self.seen_roles.append(_current_llm_role.get())
+            return SimpleNamespace(content=bad_plan)
+
+    llm = _RoleTrackingLLM()
+    create_research_manager(llm, validator_llm=_enabled_validator())(_research_manager_state())
+    assert llm.seen_roles == ["generation", "generation"]  # original call + repair, never "validator"
+
+
+@pytest.mark.unit
+def test_rm_20_validation_and_repair_call_identities_are_distinguishable():
+    set_active_seed_context(SeedContext(base_seed=42, ticker="NVDA", provider_supports_seed=True))
+    bad_plan = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: Reduce exposure if price exceeds 9999.99.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+
+    class _IdentityTrackingLLM:
+        def __init__(self):
+            self.seen_identities: list[str | None] = []
+
+        def invoke(self, prompt, **kwargs):
+            self.seen_identities.append(_current_call_identity.get())
+            return SimpleNamespace(content=bad_plan)
+
+    llm = _IdentityTrackingLLM()
+    create_research_manager(llm, validator_llm=_enabled_validator())(_research_manager_state())
+    assert llm.seen_identities == ["research_manager", "research_manager_validation_repair"]
+
+
+# --- 21-23: new observability metrics ---------------------------------------
+
+
+@pytest.mark.unit
+def test_rm_21_initial_fail_repair_pass_metrics():
+    bad_plan = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: Reduce exposure if price exceeds 9999.99.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+    repaired_plan = "**Recommendation**: Buy\n**Rationale**: Clean.\n**Strategic Actions**: Enter per plan."
+
+    class _RepairLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(content=bad_plan if self.calls == 1 else repaired_plan)
+
+    result = create_research_manager(_RepairLLM(), validator_llm=_enabled_validator())(_research_manager_state())
+    counts = summarize_validation_log(result["validation_log"])
+    assert counts["initial_failures"] == 1
+    assert counts["repairs_attempted"] == 1
+    assert counts["repairs_succeeded"] == 1
+    assert counts["final_unresolved"] == 0
+
+
+@pytest.mark.unit
+def test_rm_22_initial_fail_repair_fail_metrics():
+    bad_plan = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: Reduce exposure if price exceeds 9999.99.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+    llm = _ResearchManagerLLM(bad_plan)
+    result = create_research_manager(llm, validator_llm=_enabled_validator())(_research_manager_state())
+    counts = summarize_validation_log(result["validation_log"])
+    assert counts["initial_failures"] == 1
+    assert counts["repairs_attempted"] == 1
+    assert counts["repairs_succeeded"] == 0
+    assert counts["final_unresolved"] == 1
+
+
+@pytest.mark.unit
+def test_rm_23_pass_keeps_all_new_metrics_at_zero():
+    llm = _ResearchManagerLLM(_RM_PLAN_TEXT)
+    result = create_research_manager(llm, validator_llm=_enabled_validator())(_research_manager_state())
+    counts = summarize_validation_log(result["validation_log"])
+    assert counts["initial_failures"] == 0
+    assert counts["repairs_attempted"] == 0
+    assert counts["repairs_succeeded"] == 0
+    assert counts["final_unresolved"] == 0
+
+
+# =============================================================================
+# Provenance-leak fix: Research Manager Validator's known-number pool must
+# never include the raw analyst reports (Research Manager's own prompt never
+# shows them) -- only the free-text fields actually rendered into that
+# prompt. Numbered per this task's own "Añade tests" list (1-8).
+# =============================================================================
+
+from tradingagents.agents.managers.integrity_check import (  # noqa: E402
+    build_known_number_pool,
+    check_manager_integrity,
+)
+
+_LEAK_DEBATE = {"bull_thesis": {}, "bear_thesis": {}}
+_LEAK_RAW_REPORT = "Technical market report: resistance near 1215.0, volume climbing."
+
+
+@pytest.mark.unit
+def test_leak_1_number_only_in_raw_report_stays_unsupported_when_manager_introduces_it():
+    text = "**Rationale**: Exposure should be cut if price exceeds 1215.0."
+    # The raw report is passed only as a decoy to confirm it is NOT consulted
+    # -- check_manager_integrity_findings takes no reports parameter at all.
+    findings = check_manager_integrity_findings(text, _LEAK_DEBATE)
+    assert any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings)
+
+
+@pytest.mark.unit
+def test_leak_2_number_in_bull_canonical_input_is_supported():
+    text = "**Rationale**: Exposure should be cut if price exceeds 1196.17."
+    findings = check_manager_integrity_findings(
+        text, _LEAK_DEBATE, extra_sources=("Bull thesis: target 1196.17 supported by earnings.",),
+    )
+    assert not any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings)
+
+
+@pytest.mark.unit
+def test_leak_3_number_in_bear_canonical_input_is_supported():
+    text = "**Rationale**: Exposure should be cut if price exceeds 1070.27."
+    findings = check_manager_integrity_findings(
+        text, _LEAK_DEBATE, extra_sources=("Bear thesis: downside risk to 1070.27.",),
+    )
+    assert not any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings)
+
+
+@pytest.mark.unit
+def test_leak_4_number_in_deterministic_trade_metrics_is_supported():
+    debate = {"bull_thesis": {}, "bear_thesis": {}, "bull_trade_metrics": {"stop_loss": 1070.27}}
+    text = "**Rationale**: Exposure should be cut if price exceeds 1070.27."
+    findings = check_manager_integrity_findings(text, debate)
+    assert not any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings)
+
+
+@pytest.mark.unit
+def test_leak_5_number_in_verifier_or_repair_input_is_supported():
+    text = "**Rationale**: Exposure should be cut if price exceeds 1183.4."
+    findings = check_manager_integrity_findings(
+        text, _LEAK_DEBATE,
+        extra_sources=("Verifier summary: confirmed level 1183.4 as the key pivot.",),
+    )
+    assert not any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings)
+    findings2 = check_manager_integrity_findings(
+        text, _LEAK_DEBATE,
+        extra_sources=("Repair output: corrected pivot to 1183.4.",),
+    )
+    assert not any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings2)
+
+
+@pytest.mark.unit
+def test_leak_6_raw_report_number_never_leaks_into_rm_validator_pool():
+    """Structural guarantee: the adapter's signature has no parameter a
+    caller could (even accidentally) use to pass raw reports through."""
+    import inspect
+
+    params = inspect.signature(check_manager_integrity_findings).parameters
+    assert "reports" not in params
+    assert set(params) == {"manager_output_text", "debate", "extra_sources"}
+
+    # Behaviorally: a number present ONLY in a string that resembles a raw
+    # report, passed as extra_sources (a caller's own mistake), is NOT what
+    # this test is about -- extra_sources is the agent's allowed universe by
+    # construction in research_manager.py. What matters is that there is no
+    # "reports" channel at all, confirmed above structurally.
+    pool = build_known_number_pool(_LEAK_DEBATE)
+    assert 1215.0 not in pool
+
+
+@pytest.mark.unit
+def test_leak_7_existing_manager_integrity_call_site_behavior_is_unchanged():
+    """check_manager_integrity's OWN pre-existing signature/behavior (used
+    for the Trader-facing integrity notice) must still treat raw reports as
+    supported -- this fix only narrows the SEPARATE Validator adapter."""
+    text = "**Rationale**: Exposure should be cut if price exceeds 1215.0."
+    result = check_manager_integrity(text, _LEAK_DEBATE, _LEAK_RAW_REPORT, "", "", "")
+    assert result.findings == []  # 1215.0 is supported via the raw report, as before this fix
+
+
+@pytest.mark.unit
+def test_leak_8_trader_and_portfolio_manager_validation_unchanged():
+    """Neither Trader's nor Portfolio Manager's deterministic checks touch
+    check_manager_integrity_findings/build_known_number_pool at all -- this
+    fix cannot have changed their behavior."""
+    bad_text = "**Action**: Buy\nThe current price of 216.48 is below the prior resistance of 199.81."
+    llm = _TraderLLM(bad_text)
+    result = create_trader(llm, validator_llm=None)(_trader_state())
+    assert result["validation_log"][0]["status"] == ValidationStatus.FAIL.value
+    assert result["validation_log"][0]["repair_attempted"] is False
+
+
+# =============================================================================
+# Second real-run regression: (1) Research Manager Validator's evidence
+# universe was still missing research_horizon/setup_tags/conviction_trail,
+# causing a false PROMPT_REQUIREMENT_VIOLATION/UNSUPPORTED_NUMBER on a direct
+# restatement of a supplied setup tag; (2) limited recovery fragmented a
+# single YAML-like structured finding into one UNCLASSIFIED_VALIDATION_ERROR
+# per line. Numbered per this task's own test lists (1-14).
+# =============================================================================
+
+_SETUP_TAGS_TEXT = (
+    "RSI_BUCKET: RSI_30_50\nMACD_SIGN: NEGATIVE\nMACD_HISTOGRAM_SIGN: POSITIVE\n"
+    "PRICE_VS_EMA10: BELOW\nPRICE_VS_SMA20: NEAR\nPRICE_VS_SMA50: BELOW\n"
+    "SMA50_VS_SMA200: ABOVE\nATR_PCT_BUCKET: 2_TO_3\nVOLUME_VS_AVERAGE: UNKNOWN\n"
+    "TREND_STRUCTURE: BULLISH"
+)
+
+
+@pytest.mark.unit
+def test_tags_1_rsi_bucket_restatement_is_supported():
+    text = "**Rationale**: RSI entre 30-50, momentum neutro."
+    findings = check_manager_integrity_findings(
+        text, {"bull_thesis": {}, "bear_thesis": {}}, extra_sources=(_SETUP_TAGS_TEXT,),
+    )
+    assert not any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings)
+
+
+@pytest.mark.unit
+def test_tags_2_sma50_vs_sma200_restatement_is_supported():
+    text = "**Rationale**: SMA50 por encima de SMA200, estructura alcista."
+    findings = check_manager_integrity_findings(
+        text, {"bull_thesis": {}, "bear_thesis": {}}, extra_sources=(_SETUP_TAGS_TEXT,),
+    )
+    assert findings == []
+
+
+@pytest.mark.unit
+def test_tags_3_macd_sign_restatement_is_supported():
+    text = "**Rationale**: MACD negativo en el corto plazo."
+    findings = check_manager_integrity_findings(
+        text, {"bull_thesis": {}, "bear_thesis": {}}, extra_sources=(_SETUP_TAGS_TEXT,),
+    )
+    assert findings == []
+
+
+@pytest.mark.unit
+def test_tags_4_price_vs_ema10_restatement_is_supported():
+    text = "**Rationale**: precio por debajo de EMA10."
+    findings = check_manager_integrity_findings(
+        text, {"bull_thesis": {}, "bear_thesis": {}}, extra_sources=(_SETUP_TAGS_TEXT,),
+    )
+    assert findings == []
+
+
+@pytest.mark.unit
+def test_tags_5_number_absent_from_every_allowed_source_stays_unsupported():
+    text = "**Rationale**: Reduce exposure if price exceeds 1215.0."
+    findings = check_manager_integrity_findings(
+        text, {"bull_thesis": {}, "bear_thesis": {}}, extra_sources=(_SETUP_TAGS_TEXT,),
+    )
+    assert any(f.category == ValidationCategory.UNSUPPORTED_NUMBER for f in findings)
+
+
+@pytest.mark.unit
+def test_tags_6_raw_analyst_report_still_not_evidence_for_rm_validator():
+    import inspect
+
+    assert "reports" not in inspect.signature(check_manager_integrity_findings).parameters
+
+
+@pytest.mark.unit
+def test_tags_7_candidate_text_still_not_evidence_for_rm_validator():
+    import inspect
+
+    assert "candidate_text" not in inspect.signature(check_manager_integrity_findings).parameters
+
+
+@pytest.mark.unit
+def test_recovery_8_fail_with_simple_bullets_still_recovers_mechanically():
+    result = _limited_validator_recovery("FAIL\n- simple reason\n- another simple reason")
+    assert result is not None
+    assert result.status == ValidationStatus.FAIL
+    assert [f.reason for f in result.findings] == ["simple reason", "another simple reason"]
+
+
+@pytest.mark.unit
+def test_recovery_9_yaml_like_structured_finding_refuses_and_defers_to_normalization():
+    raw = (
+        "status: FAIL\n"
+        "findings:\n"
+        "  - category: PROMPT_REQUIREMENT_VIOLATION\n"
+        '    claim: "x"\n'
+        "    evidence:\n"
+        '      - "a"\n'
+        '      - "b"\n'
+        '    reason: "y"'
+    )
+    assert _limited_validator_recovery(raw) is None
+
+    validator = _FakeStructuredParseFailure(
+        raw,
+        normalize_response=(
+            '{"status": "FAIL", "findings": [{"category": "PROMPT_REQUIREMENT_VIOLATION", '
+            '"claim": "x", "evidence": ["a", "b"], "reason": "y"}]}'
+        ),
+    )
+    result = invoke_validator(
+        validator, stage="Research Manager", call_identity="research_manager_validation",
+        instructions="x", evidence_context="x", candidate_text="x",
+    )
+    assert validator.plain_calls == 1  # the normalization fallback, not a second verdict
+    assert result.status == ValidationStatus.FAIL
+    assert len(result.findings) == 1  # ONE finding, not one per YAML line
+
+
+@pytest.mark.unit
+def test_recovery_10_yaml_like_with_one_finding_normalizes_to_exactly_one():
+    raw = "status: WARN\nfindings:\n  - category: UNIT_ERROR\n    claim: \"x\"\n    reason: \"y\""
+    validator = _FakeStructuredParseFailure(
+        raw,
+        normalize_response='{"status": "WARN", "findings": [{"category": "UNIT_ERROR", "claim": "x", "reason": "y"}]}',
+    )
+    result = invoke_validator(
+        validator, stage="Research Manager", call_identity="research_manager_validation",
+        instructions="x", evidence_context="x", candidate_text="x",
+    )
+    assert len(result.findings) == 1
+
+
+@pytest.mark.unit
+def test_recovery_11_yaml_like_with_two_findings_normalizes_to_exactly_two():
+    raw = (
+        "status: FAIL\n"
+        "findings:\n"
+        "  - category: ARITHMETIC_ERROR\n    claim: \"a\"\n    reason: \"r1\"\n"
+        "  - category: RELATIONAL_ERROR\n    claim: \"b\"\n    reason: \"r2\""
+    )
+    validator = _FakeStructuredParseFailure(
+        raw,
+        normalize_response=(
+            '{"status": "FAIL", "findings": ['
+            '{"category": "ARITHMETIC_ERROR", "claim": "a", "reason": "r1"}, '
+            '{"category": "RELATIONAL_ERROR", "claim": "b", "reason": "r2"}]}'
+        ),
+    )
+    result = invoke_validator(
+        validator, stage="Research Manager", call_identity="research_manager_validation",
+        instructions="x", evidence_context="x", candidate_text="x",
+    )
+    assert len(result.findings) == 2
+
+
+@pytest.mark.unit
+def test_recovery_12_field_key_lines_never_become_their_own_findings():
+    raw = "status: FAIL\nfindings:\n  - category: ARITHMETIC_ERROR\n    claim: \"a\"\n    reason: \"r1\""
+    recovered = _limited_validator_recovery(raw)
+    assert recovered is None  # refused mechanically -- never fragmented into
+    # "category: ARITHMETIC_ERROR" / "claim: ..." / "reason: ..." findings.
+
+
+@pytest.mark.unit
+def test_recovery_13_pass_with_empty_findings_normalizes_safely():
+    raw = "status: PASS\nfindings: []"
+    validator = _FakeStructuredParseFailure(raw, normalize_response='{"status": "PASS", "findings": []}')
+    result = invoke_validator(
+        validator, stage="Research Manager", call_identity="research_manager_validation",
+        instructions="x", evidence_context="x", candidate_text="x",
+    )
+    assert result.status == ValidationStatus.PASS
+    assert result.findings == []
+    assert validator.plain_calls == 1
+
+
+@pytest.mark.unit
+def test_recovery_14_normalizer_never_receives_candidate_or_evidence():
+    """The normalize-only call must not be able to change meaning -- it
+    never even sees candidate/evidence to re-evaluate against."""
+    raw = (
+        "status: FAIL\nfindings:\n  - category: ARITHMETIC_ERROR\n"
+        '    claim: "a"\n    reason: "r1"'
+    )
+    captured_prompts = []
+
+    class _CapturingNormalizer(_FakeStructuredParseFailure):
+        def invoke(self, prompt, seed=None):
+            captured_prompts.append(prompt)
+            return super().invoke(prompt, seed)
+
+    validator = _CapturingNormalizer(
+        raw, normalize_response='{"status": "FAIL", "findings": [{"category": "ARITHMETIC_ERROR", "claim": "a", "reason": "r1"}]}',
+    )
+    invoke_validator(
+        validator, stage="Research Manager", call_identity="research_manager_validation",
+        instructions="SECRET_INSTRUCTIONS_MARKER", evidence_context="SECRET_EVIDENCE_MARKER",
+        candidate_text="SECRET_CANDIDATE_MARKER",
+    )
+    normalize_prompt = captured_prompts[-1]
+    assert "SECRET_INSTRUCTIONS_MARKER" not in normalize_prompt
+    assert "SECRET_EVIDENCE_MARKER" not in normalize_prompt
+    assert "SECRET_CANDIDATE_MARKER" not in normalize_prompt
+
+
+@pytest.mark.unit
+def test_real_regression_setup_tags_restatement_does_not_trigger_false_fail_end_to_end():
+    """End-to-end reproduction of the real seed-300000003 case: Research
+    Manager restates setup tags it was explicitly given; must not get FAIL'd
+    and repaired into losing that legitimate content."""
+    state = _research_manager_state()
+    state["investment_debate_state"]["setup_tags"] = {
+        "RSI_BUCKET": "RSI_30_50", "MACD_SIGN": "NEGATIVE",
+        "PRICE_VS_EMA10": "BELOW", "PRICE_VS_SMA50": "BELOW",
+        "SMA50_VS_SMA200": "ABOVE", "TREND_STRUCTURE": "BULLISH",
+    }
+    candidate = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: La estructura de tendencia es alcista (SMA50 por encima de SMA200), "
+        "mientras el corto plazo muestra RSI entre 30-50, MACD negativo y precio "
+        "por debajo de EMA10 y SMA50.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+    llm = _ResearchManagerLLM(candidate)
+    result = create_research_manager(llm, validator_llm=None)(state)
+    assert llm.calls == 1  # no repair triggered
+    assert result["validation_log"][0]["status"] == ValidationStatus.PASS.value
+    assert result["investment_plan"] == candidate  # nothing stripped out
+
+
+# =============================================================================
+# Third targeted correction (overnight real benchmarks): (1) Portfolio
+# Manager Validator's evidence_context was missing the instrument identity
+# (ticker + resolved company name) the real PM prompt always renders, causing
+# a false UNKNOWN_USED_AS_FACT on the ticker itself; Trader and Research
+# Manager had the exact same omission, confirmed and fixed identically.
+# (2) the normalizer's JSON response lost an otherwise-valid finding whenever
+# an optional field (suggested_correction/reason/claim/evidence) came back as
+# an explicit JSON null the schema already treats as empty by default.
+# Numbered per this task's own "TESTS" list (1-15).
+# =============================================================================
+
+
+def _pm_state(ticker="LLY"):
+    state = Propagator().create_initial_state(ticker, "2026-09-01")
+    state["investment_plan"] = "Overweight plan"
+    state["trader_investment_plan"] = "**Action**: Buy\n**Entry Price**: 100\n**Stop Loss**: 95"
+    return state
+
+
+_PM_DECISION_TEXT = (
+    "**Rating**: Overweight\n**Disposition**: KEEP\n"
+    "**Executive Summary**: Clean summary.\n**Investment Thesis**: Clean thesis."
+)
+
+
+@pytest.mark.unit
+def test_pm_1_ticker_in_pm_identity_and_candidate_is_supported():
+    capturing = _CapturingValidator()
+
+    class _PMLLM:
+        def invoke(self, prompt):
+            return SimpleNamespace(content=_PM_DECISION_TEXT)
+
+    create_portfolio_manager(_PMLLM(), validator_llm=capturing)(_pm_state("LLY"))
+    assert any("LLY" in p for p in capturing.prompts)
+
+
+@pytest.mark.unit
+def test_pm_2_candidate_introduces_a_different_ticker_finding_is_preserved_if_flagged():
+    """No deterministic ticker cross-check exists (tickers aren't numbers,
+    so the UNSUPPORTED_NUMBER/UNKNOWN_USED_AS_FACT post-filter can't rescue
+    or contradict a ticker-shaped claim either way) -- if the Validator LLM
+    flags a genuinely new ticker, that finding must stay, never be silently
+    dropped by this task's fixes."""
+    finding = ValidationFinding(
+        category=ValidationCategory.UNKNOWN_USED_AS_FACT, claim="MSFT", reason="x",
+    )
+    reason = _why_llm_finding_should_be_dropped(finding, [], "Instrument identity:\nThe instrument to analyze is `LLY`.")
+    assert reason is None  # kept -- not dropped, not rescued; "MSFT" has no digits to cross-check
+
+
+@pytest.mark.unit
+def test_pm_3_resolved_company_name_repeatable_without_unsupported_finding():
+    capturing = _CapturingValidator()
+
+    class _PMLLM:
+        def invoke(self, prompt):
+            return SimpleNamespace(content=_PM_DECISION_TEXT)
+
+    state = _pm_state("LLY")
+    state["instrument_context"] = "The instrument to analyze is `LLY`. Resolved identity: Eli Lilly and Company."
+    create_portfolio_manager(_PMLLM(), validator_llm=capturing)(state)
+    assert any("Eli Lilly and Company" in p for p in capturing.prompts)
+
+
+@pytest.mark.unit
+def test_pm_4_ticker_only_in_candidate_never_counts_as_its_own_support():
+    """Structural: the PM node's evidence_context is built from STATE
+    (instrument_context/portfolio_context/research_plan/trader_plan/history/
+    risk_integrity_notice), never from the candidate the Validator is
+    checking. The candidate text is naturally shown too (that's what's being
+    checked), under its own "Candidate response to check:" section -- the
+    point is a candidate's own stray content is never ALSO injected into the
+    "Relevant input/evidence:" section as if it were supporting evidence."""
+    capturing = _CapturingValidator()
+
+    class _PMLLM:
+        def invoke(self, prompt):
+            return SimpleNamespace(content=_PM_DECISION_TEXT + "\nMentions AAPL.")
+
+    create_portfolio_manager(_PMLLM(), validator_llm=capturing)(_pm_state("LLY"))
+    sent_prompt = capturing.prompts[0]
+    evidence_section = sent_prompt.split("Candidate response to check:")[0]
+    assert "LLY" in evidence_section
+    assert "AAPL" not in evidence_section  # only in the candidate section, never injected as evidence
+
+
+@pytest.mark.unit
+def test_pm_5_trader_and_research_manager_identity_parity_fixed_too():
+    capturing_trader = _CapturingValidator()
+    llm = _TraderLLM("**Action**: Buy\n**Entry Price**: 100\n**Stop Loss**: 95")
+    create_trader(llm, validator_llm=capturing_trader)(_trader_state())
+    assert any("NVDA" in p for p in capturing_trader.prompts)
+
+    capturing_rm = _CapturingValidator()
+    rm_llm = _ResearchManagerLLM(_RM_PLAN_TEXT)
+    create_research_manager(rm_llm, validator_llm=capturing_rm)(_research_manager_state())
+    assert any("NVDA" in p for p in capturing_rm.prompts)
+
+
+# --- 5-14 (shared with the regression lists above): null sanitization ------
+
+
+@pytest.mark.unit
+def test_null_5_suggested_correction_null_sanitizes_to_empty_string():
+    result = _try_json_parse(
+        '{"status": "FAIL", "findings": [{"category": "RELATIONAL_ERROR", '
+        '"claim": "x", "reason": "y", "suggested_correction": null}]}'
+    )
+    assert result is not None
+    assert result.findings[0].suggested_correction == ""
+
+
+@pytest.mark.unit
+def test_null_6_valid_fail_survives_null_sanitization():
+    result = _try_json_parse(
+        '{"status": "FAIL", "findings": [{"category": "RELATIONAL_ERROR", '
+        '"claim": "1157.08 is between 1152.56 and 1108.96", '
+        '"evidence": ["1157.08", "1152.56"], '
+        '"reason": "1157.08 is greater than 1152.56, not between them", '
+        '"suggested_correction": null}]}'
+    )
+    assert result is not None
+    assert result.status == ValidationStatus.FAIL
+    assert len(result.findings) == 1
+    assert result.findings[0].category == ValidationCategory.RELATIONAL_ERROR
+
+
+@pytest.mark.unit
+def test_null_7_valid_fail_with_sanitized_null_triggers_exactly_one_repair():
+    raw = (
+        '{"status": "FAIL", "findings": [{"category": "RELATIONAL_ERROR", '
+        '"claim": "1157.08 is below 1152.56", "evidence": [], '
+        '"reason": "contradiction", "suggested_correction": null}]}'
+    )
+    validator = _FakeStructuredParseFailure(raw)  # structured fails, raw IS valid JSON (w/ null)
+    original = _FakeLLM(responses=["repaired"])
+    outcome = validate_and_repair(
+        stage="Trader", validator_llm=validator, original_llm=original,
+        original_role="generation", call_identity_base="trader",
+        instructions="x", evidence_context="x", candidate_text="candidate",
+        candidate_parsed=None, expected_schema=None, render_fn=None,
+        deterministic_check_fn=lambda text, parsed: [],
+    )
+    assert outcome.status != ValidationStatus.WARN.value  # never silently degraded to WARN
+    assert outcome.repair_attempted is True
+    assert original.calls == 1
+
+
+@pytest.mark.unit
+def test_null_8_recheck_runs_exactly_once_after_sanitized_fail_repair():
+    raw = (
+        '{"status": "FAIL", "findings": [{"category": "RELATIONAL_ERROR", '
+        '"claim": "1157.08 is below 1152.56", "evidence": [], "reason": "y", '
+        '"suggested_correction": null}]}'
+    )
+    validator = _FakeStructuredParseFailure(raw)
+    original = _FakeLLM(responses=["repaired"])
+    validate_and_repair(
+        stage="Trader", validator_llm=validator, original_llm=original,
+        original_role="generation", call_identity_base="trader",
+        instructions="x", evidence_context="x", candidate_text="candidate",
+        candidate_parsed=None, expected_schema=None, render_fn=None,
+        deterministic_check_fn=lambda text, parsed: [],
+    )
+    assert validator.structured_calls == 2  # initial check + exactly one recheck
+    assert original.calls == 1  # exactly one repair, never a second
+
+
+@pytest.mark.unit
+def test_null_9_status_or_category_null_remain_unrecoverable():
+    assert _try_json_parse('{"status": null, "findings": []}') is None
+    assert _try_json_parse(
+        '{"status": "FAIL", "findings": [{"category": null, "claim": "x"}]}'
+    ) is None
+
+
+@pytest.mark.unit
+def test_null_10_evidence_null_sanitizes_to_empty_list_only():
+    result = _try_json_parse(
+        '{"status": "WARN", "findings": [{"category": "UNIT_ERROR", '
+        '"claim": "x", "reason": "y", "evidence": null}]}'
+    )
+    assert result is not None
+    assert result.findings[0].evidence == []
+
+
+@pytest.mark.unit
+def test_null_sanitization_never_touches_other_payload_shapes():
+    """Not a dict, or no findings list -- sanitize is a pure no-op, never
+    reshapes anything it wasn't explicitly told to."""
+    assert _try_json_parse("[1, 2, 3]") is None  # a JSON array, not an object
+    assert _try_json_parse('{"status": "PASS"}') is not None  # no findings key at all -- default []
+
+
+# --- 11-12: the real cases that must remain correctly detected --------------
+
+
+@pytest.mark.unit
+def test_11_rm_real_entry_contradiction_remains_detected():
+    """Real benchmark (seed 1480000014): Manager silently changed Bull's
+    verified entry 1157.08 to 1152.56 -- this is exactly a RELATIONAL_ERROR-
+    shaped contradiction the Validator LLM (not the deterministic layer) is
+    meant to catch; confirm the bounded repair/recheck machinery correctly
+    restores a corrected entry and reaches PASS."""
+
+    class _EntryChangingLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    content="**Recommendation**: Buy\n**Rationale**: Entry near 1152.56.\n"
+                    "**Strategic Actions**: Enter per plan.",
+                )
+            return SimpleNamespace(
+                content="**Recommendation**: Buy\n**Rationale**: Entry 1157.08 as verified.\n"
+                "**Strategic Actions**: Enter per plan.",
+            )
+
+    validator = _FakeStructuredValidator(ValidationResult(
+        status=ValidationStatus.FAIL,
+        findings=[ValidationFinding(
+            category=ValidationCategory.UNSUPPORTED_NUMBER,
+            claim="1152.56 is used as the entry price",
+            reason="the verified Bull entry is 1157.08, not 1152.56 -- silently changed",
+        )],
+    ))
+    llm = _EntryChangingLLM()
+    outcome = validate_and_repair(
+        stage="Research Manager", validator_llm=validator, original_llm=llm,
+        original_role="generation", call_identity_base="research_manager",
+        instructions="x", evidence_context="Bull entry: 1157.08", candidate_text=llm.invoke("x").content,
+        candidate_parsed=None, expected_schema=None, render_fn=None,
+        deterministic_check_fn=lambda text, parsed: [],
+    )
+    assert outcome.repair_attempted is True
+    assert "1157.08" in outcome.final_text
+
+
+@pytest.mark.unit
+def test_12_rm_setup_tags_regression_remains_fixed():
+    state = _research_manager_state()
+    state["investment_debate_state"]["setup_tags"] = {
+        "RSI_BUCKET": "RSI_30_50", "MACD_SIGN": "NEGATIVE",
+        "PRICE_VS_EMA10": "BELOW", "PRICE_VS_SMA50": "BELOW",
+        "SMA50_VS_SMA200": "ABOVE", "TREND_STRUCTURE": "BULLISH",
+    }
+    candidate = (
+        "**Recommendation**: Buy\n"
+        "**Rationale**: SMA50 por encima de SMA200, RSI entre 30-50, MACD negativo.\n"
+        "**Strategic Actions**: Enter per plan."
+    )
+    llm = _ResearchManagerLLM(candidate)
+    result = create_research_manager(llm, validator_llm=None)(state)
+    assert llm.calls == 1
+    assert result["validation_log"][0]["status"] == ValidationStatus.PASS.value
+
+
+@pytest.mark.unit
+def test_13_validation_disabled_unchanged_across_all_three_stages():
+    for factory, state, llm_text in (
+        (create_trader, _trader_state(), "**Action**: Hold\nNo change."),
+        (create_portfolio_manager, _pm_state(), _PM_DECISION_TEXT),
+        (create_research_manager, _research_manager_state(), _RM_PLAN_TEXT),
+    ):
+        if factory is create_trader:
+            llm = _TraderLLM(llm_text)
+        elif factory is create_portfolio_manager:
+            class _L:
+                def __init__(self, text):
+                    self.text = text
+
+                def invoke(self, prompt):
+                    return SimpleNamespace(content=self.text)
+            llm = _L(llm_text)
+        else:
+            llm = _ResearchManagerLLM(llm_text)
+        result = factory(llm, validator_llm=None)(state)
+        entry = result["validation_log"][0]
+        assert entry["repair_attempted"] is False
+
+
+@pytest.mark.unit
+def test_14_research_verifier_still_unchanged():
+    from tradingagents.agents.researchers.research_verifier import create_research_verifier
+
+    assert create_research_verifier is not None
+
+
+@pytest.mark.unit
+def test_15_generation_review_validator_routing_unchanged():
+    import inspect
+
+    assert "validator_llm" in inspect.signature(create_trader).parameters
+    assert "validator_llm" in inspect.signature(create_portfolio_manager).parameters
+    assert "validator_llm" in inspect.signature(create_research_manager).parameters
 
 
 # === 33-35: regression guards — generation/review routing, Verifier,

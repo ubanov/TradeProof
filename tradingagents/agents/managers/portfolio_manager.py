@@ -114,15 +114,19 @@ def create_portfolio_manager(generation_llm, validator_llm=None):
             original_role="generation",
             call_identity_base="portfolio_manager",
             instructions=_PM_CONTRACT,
-            # Must cover the same sources Portfolio Manager's own prompt
-            # actually gives it (see managers/portfolio_manager.txt) -- not
-            # just the research/trader plans and Risk discussion, or
-            # Validator flags a legitimately-cited portfolio/lessons number
-            # as UNSUPPORTED_NUMBER simply for falling outside its own,
-            # narrower evidence window.
+            # Full parity with the Portfolio Manager's own prompt above --
+            # every source it renders, so the Validator LLM never flags the
+            # ticker/resolved-identity string (or a Risk integrity notice
+            # the Manager was explicitly given) as unsupported/invented
+            # (real-run regression: a missing instrument_context caused a
+            # false UNKNOWN_USED_AS_FACT on the ticker itself). Never the
+            # candidate text itself.
             evidence_context=(
+                f"Instrument identity:\n{instrument_context}\n\n"
                 f"Research plan:\n{research_plan}\n\nTrader plan:\n{trader_plan}\n\n"
-                f"Risk discussion:\n{history}\n\nPortfolio context:\n{portfolio_context}"
+                f"Risk discussion:\n{history}\n\n"
+                f"Risk integrity notice:\n{risk_integrity_notice or 'No unsupported claims detected in the Risk discussion.'}\n\n"
+                f"Portfolio context:\n{portfolio_context}"
                 + (f"\n\nPrior lessons:\n{past_context}" if past_context else "")
             ),
             candidate_text=final_trade_decision,

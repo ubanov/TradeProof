@@ -50,13 +50,27 @@ from tradingagents.agents.integrity_shared import (
 # ---------------------------------------------------------------------------
 
 
-def build_known_number_pool(debate: dict, *reports: str) -> list[float]:
+def build_known_number_pool(
+    debate: dict, *reports: str, extra_sources: tuple[str, ...] = (),
+) -> list[float]:
     """Numbers traceable to analyst evidence, verified theses, or deterministic
     calculations -- the only numbers a manager-stated threshold may reuse.
+
+    ``extra_sources`` extends the pool with any further free-text sources a
+    caller's own allowed-evidence universe includes but ``reports``/``debate``
+    don't already cover -- scanned with the exact same ``extract_numbers``
+    call as ``reports``, never a different extraction method. Added for the
+    Research Manager Validator (see ``validator_deterministic.py::
+    check_manager_integrity_findings``), whose caller must NOT pass the raw
+    analyst ``reports`` here (Research Manager's own prompt never shows them)
+    but does need bull/bear's free-text narrative counted as supported.
+    Defaults to ``()`` so every existing caller is unaffected.
     """
     pool: list[float] = []
     for report in reports:
         pool.extend(extract_numbers(report or ""))
+    for source in extra_sources:
+        pool.extend(extract_numbers(source or ""))
 
     for side in ("bull", "bear"):
         thesis = debate.get(f"{side}_thesis") or {}
@@ -212,12 +226,18 @@ def check_manager_integrity(
     manager_output_text: str,
     debate: dict,
     *reports: str,
+    extra_sources: tuple[str, ...] = (),
 ) -> ManagerIntegrityResult:
     """Run every deterministic check against the Research Manager's rendered
     output and return one PASS/WARN result. Never raises; never calls an LLM.
+
+    ``extra_sources`` is forwarded to ``build_known_number_pool`` as-is (see
+    its own docstring) -- defaults to ``()``, so this call's existing
+    callers (e.g. the Trader-facing integrity notice, which passes the raw
+    analyst ``reports`` instead) are completely unaffected.
     """
     text = manager_output_text or ""
-    pool = build_known_number_pool(debate, *reports)
+    pool = build_known_number_pool(debate, *reports, extra_sources=extra_sources)
     withdrawn = list(debate.get("withdrawn_values") or []) + extract_corrected_away_numbers(
         (debate.get("review_outcomes") or "").split("\n")
     )

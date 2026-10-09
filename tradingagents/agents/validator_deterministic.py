@@ -20,6 +20,10 @@ from tradingagents.agents.integrity_shared import (
     find_relational_errors,
     find_unit_errors,
 )
+from tradingagents.agents.managers.integrity_check import (
+    ManagerFindingCategory,
+    check_manager_integrity,
+)
 from tradingagents.agents.researchers.arithmetic import check_arithmetic
 from tradingagents.agents.schemas import ArithmeticClaim
 from tradingagents.agents.validation_schemas import ValidationCategory, ValidationFinding
@@ -139,3 +143,55 @@ def check_missing_requirement(candidate_text: str, required_markers: list[str]) 
                 )
             )
     return findings
+
+
+# Research Manager's own finding categories map onto Validator's narrower
+# taxonomy where the defect really is the same thing; anything reserved/
+# never actually produced (INTERNAL_INCONSISTENCY) still gets a safe mapping.
+_MANAGER_CATEGORY_MAP = {
+    ManagerFindingCategory.NEW_UNSUPPORTED_THRESHOLD.value: ValidationCategory.UNSUPPORTED_NUMBER,
+    ManagerFindingCategory.NEW_UNSUPPORTED_LEVEL.value: ValidationCategory.UNSUPPORTED_NUMBER,
+    ManagerFindingCategory.UNSUPPORTED_SIZING_RULE.value: ValidationCategory.UNSUPPORTED_NUMBER,
+    ManagerFindingCategory.ARITHMETIC_ERROR.value: ValidationCategory.ARITHMETIC_ERROR,
+    ManagerFindingCategory.RELATIONAL_ERROR.value: ValidationCategory.RELATIONAL_ERROR,
+    # A self-assessed conviction score stated as if it were a market
+    # probability violates the prompt's own explicit instruction, not a
+    # missing/unsupported number as such.
+    ManagerFindingCategory.CONVICTION_AS_PROBABILITY.value: ValidationCategory.PROMPT_REQUIREMENT_VIOLATION,
+    # A value the review round explicitly withdrew/corrected away is, by
+    # definition, no longer supported if reused.
+    ManagerFindingCategory.WITHDRAWN_VALUE_REUSED.value: ValidationCategory.UNSUPPORTED_NUMBER,
+    ManagerFindingCategory.INTERNAL_INCONSISTENCY.value: ValidationCategory.INTERNAL_CONTRADICTION,
+}
+
+
+def check_manager_integrity_findings(
+    manager_output_text: str, debate: dict, *, extra_sources: tuple[str, ...] = (),
+) -> list[ValidationFinding]:
+    """Thin adapter over the EXISTING Research Manager integrity check
+    (``managers/integrity_check.py::check_manager_integrity``) -- reused
+    as-is (known-number pool, arithmetic/relational/withdrawn-value
+    scanning), never a second implementation of the same checks.
+
+    Deliberately takes NO raw analyst ``reports`` parameter at all -- unlike
+    ``check_manager_integrity``'s own pre-existing call site (which still
+    feeds the Trader-facing integrity notice with the full reports), this
+    adapter is Validator's provenance check for what Research Manager's OWN
+    prompt actually renders to it, which never includes the raw reports.
+    ``extra_sources`` is that allowed universe's free-text fields (bull/bear
+    initial theses, review outcomes, verification summary, repair outputs,
+    final bull/bear positions) -- passing a raw analyst report here would
+    reintroduce the exact provenance leak this signature prevents structurally
+    (a number known only from a report Research Manager never saw being
+    treated as "supported" merely because it was reachable in AgentState)."""
+    result = check_manager_integrity(manager_output_text, debate, extra_sources=extra_sources)
+    return [
+        ValidationFinding(
+            category=_MANAGER_CATEGORY_MAP.get(
+                finding.category, ValidationCategory.UNCLASSIFIED_VALIDATION_ERROR,
+            ),
+            claim=finding.detail,
+            reason=f"Research Manager integrity check: {finding.category}",
+        )
+        for finding in result.findings
+    ]
