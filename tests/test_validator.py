@@ -26,7 +26,7 @@ from tradingagents.agents.schemas import (
     TraderAction,
     TraderProposal,
 )
-from tradingagents.agents.trader.trader import create_trader
+from tradingagents.agents.trader.trader import _trader_deterministic_checks, create_trader
 from tradingagents.agents.validation_schemas import (
     ValidationCategory,
     ValidationFinding,
@@ -46,6 +46,8 @@ from tradingagents.agents.validator_deterministic import (
     check_json_syntax,
     check_manager_integrity_findings,
     check_missing_requirement,
+    check_price_field_percentage,
+    check_relational_errors,
     check_schema,
     check_text_relational_and_unit_errors,
 )
@@ -2418,6 +2420,174 @@ def test_15_generation_review_validator_routing_unchanged():
     assert "validator_llm" in inspect.signature(create_trader).parameters
     assert "validator_llm" in inspect.signature(create_portfolio_manager).parameters
     assert "validator_llm" in inspect.signature(create_research_manager).parameters
+
+
+# =============================================================================
+# Fourth targeted correction (real hybrid-run benchmark): Trader's
+# deterministic UNIT_ERROR check used the generic, sentence-wide
+# ``find_unit_errors`` (LEVEL_WORDS + an English-only exclude-window), which
+# false-positived on a descriptive stop-distance percentage in narrative
+# prose ("distancia de stop (25 pts ~= 2.16% del precio actual)") -- an
+# English-only exclusion list never matches Spanish phrasing, and the level
+# word's own exclusion window only looks FORWARD, never at context stated
+# BEFORE it. Trader now uses a narrow, field-line-anchored check instead
+# (Entry Price/Entry/Stop Loss/Stop/Take Profit/TP lines only); Portfolio
+# Manager's own ``check_text_relational_and_unit_errors`` is untouched.
+# =============================================================================
+
+
+@pytest.mark.unit
+def test_relational_errors_only_check_still_flags_real_contradictions():
+    """Trader keeps full RELATIONAL_ERROR coverage -- only UNIT_ERROR
+    scanning was narrowed."""
+    findings = check_relational_errors("The current price of 216.48 is below the prior resistance of 199.81.")
+    assert len(findings) == 1
+    assert findings[0].category == ValidationCategory.RELATIONAL_ERROR
+
+
+@pytest.mark.unit
+def test_pct_1_entry_price_bare_percentage_is_unit_error():
+    findings = check_price_field_percentage("**Entry Price:** 2.16%")
+    assert len(findings) == 1
+    assert findings[0].category == ValidationCategory.UNIT_ERROR
+
+
+@pytest.mark.unit
+def test_pct_2_stop_loss_bare_percentage_is_unit_error():
+    findings = check_price_field_percentage("**Stop Loss:** 2.16%")
+    assert len(findings) == 1
+    assert findings[0].category == ValidationCategory.UNIT_ERROR
+
+
+@pytest.mark.unit
+def test_pct_3_take_profit_signed_percentage_is_unit_error():
+    findings = check_price_field_percentage("**Take Profit:** +5%")
+    assert len(findings) == 1
+    assert findings[0].category == ValidationCategory.UNIT_ERROR
+
+
+@pytest.mark.unit
+def test_pct_4_reasoning_percentage_vs_sma_is_not_unit_error():
+    assert check_price_field_percentage("Reasoning: price is 7.5% above SMA200.") == []
+
+
+@pytest.mark.unit
+def test_pct_5_distance_equivalence_percentage_is_not_unit_error():
+    assert check_price_field_percentage("25 pts = 2.16% of entry") == []
+
+
+@pytest.mark.unit
+def test_pct_6_revenue_growth_percentage_is_not_unit_error():
+    assert check_price_field_percentage("Revenue grew 47.5% year over year.") == []
+
+
+@pytest.mark.unit
+def test_pct_7_position_sizing_percentage_is_not_a_price_level_finding():
+    assert check_price_field_percentage("**Position Sizing:** 1% of portfolio") == []
+
+
+@pytest.mark.unit
+def test_pct_8_absolute_levels_plus_descriptive_percentages_pass_deterministic_check():
+    candidate = (
+        "**Entry Price:** 1145.00 - 1165.00\n"
+        "**Stop Loss:** 1130.00\n"
+        "**Take Profit:** 1177.00\n"
+        "**Position Sizing:** Unknown ...\n"
+        "distance to stop is 25 pts ≈ 2.16% of current price"
+    )
+    assert check_price_field_percentage(candidate) == []
+    assert _trader_deterministic_checks(candidate, None) == []
+
+
+@pytest.mark.unit
+def test_real_case_descriptive_stop_distance_percentage_no_longer_flagged():
+    """Exact real-run text (translated) that produced the false UNIT_ERROR."""
+    candidate = (
+        "**Position Sizing:** Unknown ...\n"
+        "distancia de stop (25 pts ≈ 2.16% del precio actual)"
+    )
+    assert check_price_field_percentage(candidate) == []
+
+
+@pytest.mark.unit
+def test_real_fcf_margin_percentage_is_not_unit_error():
+    assert check_price_field_percentage("FCF margin is 20%.") == []
+
+
+@pytest.mark.unit
+def test_portfolio_manager_unit_error_check_remains_the_generic_one():
+    """Explicitly NOT changed -- Portfolio Manager keeps using the shared,
+    unmodified check_text_relational_and_unit_errors (see fork README:
+    "NO CAMBIAR: Portfolio Manager Validator")."""
+    import inspect
+
+    import tradingagents.agents.managers.portfolio_manager as pm_mod
+
+    assert "check_text_relational_and_unit_errors" in inspect.getsource(pm_mod)
+    assert "check_price_field_percentage" not in inspect.getsource(pm_mod)
+
+
+@pytest.mark.unit
+def test_ideal_regression_missing_ticker_is_the_real_initial_fail_not_the_false_unit_error():
+    """Ideal regression: with the descriptive-percentage false positive
+    gone, the ONE real problem in a real Trader response -- a missing
+    required ticker mention -- is what the single bounded repair is spent
+    on, and recheck reaches PASS once it's added."""
+    original_text = (
+        "**Action**: Buy\n"
+        "**Entry Price:** 1145.00 - 1165.00\n"
+        "**Stop Loss:** 1130.00\n"
+        "**Take Profit:** 1177.00\n"
+        "**Position Sizing:** Unknown ...\n"
+        "distance to stop is 25 pts ≈ 2.16% of current price"
+    )
+    repaired_text = original_text + "\n**Ticker**: LLY"
+
+    class _TraderRepairLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(content=original_text if self.calls == 1 else repaired_text)
+
+    class _TickerAwareValidator:
+        """Simulates the real recheck's PROMPT_REQUIREMENT_VIOLATION: FAIL
+        while the candidate never mentions LLY, PASS once it does -- never
+        triggered by the (now-fixed) descriptive percentage."""
+
+        def with_structured_output(self, _schema, include_raw=False):
+            assert include_raw is True
+            return self
+
+        def invoke(self, prompt, seed=None):
+            candidate_section = prompt.split("Candidate response to check:")[-1]
+            if "LLY" in candidate_section:
+                result = ValidationResult(status=ValidationStatus.PASS, findings=[])
+            else:
+                result = ValidationResult(
+                    status=ValidationStatus.FAIL,
+                    findings=[ValidationFinding(
+                        category=ValidationCategory.PROMPT_REQUIREMENT_VIOLATION,
+                        claim="ticker LLY not mentioned in Trader response",
+                        reason="required ticker mention is missing",
+                    )],
+                )
+            return {"raw": SimpleNamespace(content=result.model_dump_json()), "parsed": result, "parsing_error": None}
+
+    llm = _TraderRepairLLM()
+    state = Propagator().create_initial_state("LLY", "2026-09-01")
+    state["investment_plan"] = "Buy plan"
+    state["market_report"] = ""
+    result = create_trader(llm, validator_llm=_TickerAwareValidator())(state)
+
+    entry = result["validation_log"][0]
+    assert entry["initial_status"] == ValidationStatus.FAIL.value
+    assert "UNIT_ERROR" not in entry["categories"]  # the false positive is gone
+    assert entry["repair_attempted"] is True
+    assert llm.calls == 2  # original + exactly one repair, spent on the real problem
+    assert "LLY" in result["trader_investment_plan"]
+    assert entry["status"] == ValidationStatus.PASS.value  # recheck PASS
 
 
 # === 33-35: regression guards — generation/review routing, Verifier,

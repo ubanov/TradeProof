@@ -13,6 +13,7 @@ implementation of the same regex/arithmetic.
 from __future__ import annotations
 
 import json
+import re
 
 from pydantic import BaseModel, ValidationError
 
@@ -103,6 +104,72 @@ def check_text_relational_and_unit_errors(text: str) -> list[ValidationFinding]:
                 reason="A price/level field is stated as a bare percentage.",
             )
         )
+    return findings
+
+
+def check_relational_errors(text: str) -> list[ValidationFinding]:
+    """RELATIONAL_ERROR only -- no unit-error scanning. Used by Trader in
+    place of ``check_text_relational_and_unit_errors`` (see
+    ``check_price_field_percentage`` below for the narrower, field-line-
+    based UNIT_ERROR replacement): the generic sentence-wide ``find_unit_
+    errors`` false-positived on a descriptive stop-distance percentage in
+    narrative prose (real-run regression), and is deliberately NOT reused
+    here for Trader. ``check_text_relational_and_unit_errors`` itself is
+    left completely unchanged for its other caller (Portfolio Manager)."""
+    return [
+        ValidationFinding(
+            category=ValidationCategory.RELATIONAL_ERROR,
+            claim=excerpt,
+            reason="Stated comparison between two explicit numbers does not hold.",
+        )
+        for excerpt in find_relational_errors(text)
+    ]
+
+
+# Trader's own contractual price/level fields (see schemas.py::
+# render_trader_proposal and the free-text fallback's equivalent prose) --
+# deliberately a short, explicit, line-anchored list, never a scan of every
+# LEVEL_WORDS occurrence in narrative text (see task: "porcentaje
+# descriptivo de distancia confundido con price field"). Longer labels
+# first so "Entry Price" matches before the shorter "Entry" alternative can.
+_TRADER_PRICE_FIELD_LABELS = ("Entry Price", "Entry", "Stop Loss", "Stop", "Take Profit", "TP")
+_TRADER_FIELD_LINE_RE = re.compile(
+    r"(?im)^\s*\**(" + "|".join(re.escape(label) for label in _TRADER_PRICE_FIELD_LABELS) + r")\**\s*:\s*(.+?)\s*$"
+)
+# The field's ENTIRE value, not a substring -- "2.16%" is a bare percentage
+# standing in for an absolute price; "1145.00 - 1165.00" or "not provided"
+# never match this, regardless of what percentages appear elsewhere in the
+# surrounding sentence/paragraph.
+_BARE_PERCENT_VALUE_RE = re.compile(r"^[+-]?\$?\d+(?:\.\d+)?\s*%$")
+
+
+def check_price_field_percentage(text: str) -> list[ValidationFinding]:
+    """UNIT_ERROR only when an EXPLICIT Trader contract field line (Entry
+    Price/Entry/Stop Loss/Stop/Take Profit/TP) states a bare percentage as
+    its entire value (e.g. "**Stop Loss**: 3%") -- never a general scan for
+    "%" anywhere near a level word in narrative/reasoning text. A descriptive
+    stop-distance percentage ("25 pts, approximately 2.16% of current
+    price"), a relative-change percentage, or a financial-metric percentage
+    (revenue growth, FCF margin, position sizing "% of portfolio") never
+    appears on one of these labeled lines and is therefore never flagged,
+    no matter where else in the response it appears. The real contractual
+    rule -- entry_price/stop_loss must be absolute prices -- is unaffected:
+    a genuine "Entry Price: 2.5%" or "Stop Loss: 3%" line is still caught.
+    """
+    findings = []
+    for line in (text or "").splitlines():
+        match = _TRADER_FIELD_LINE_RE.match(line)
+        if match is None:
+            continue
+        label, value = match.group(1), match.group(2).strip().strip("*").strip()
+        if _BARE_PERCENT_VALUE_RE.match(value):
+            findings.append(
+                ValidationFinding(
+                    category=ValidationCategory.UNIT_ERROR,
+                    claim=f"{label}: {value}",
+                    reason="A price/level field is stated as a bare percentage instead of an absolute price.",
+                )
+            )
     return findings
 
 

@@ -22,7 +22,8 @@ from tradingagents.agents.structured import (
 from tradingagents.agents.validator import validate_and_repair
 from tradingagents.agents.validator_deterministic import (
     check_entry_stop_direction,
-    check_text_relational_and_unit_errors,
+    check_price_field_percentage,
+    check_relational_errors,
 )
 from tradingagents.prompts.loader import load_prompt, render_agent_prompt
 
@@ -41,7 +42,14 @@ _TRADER_CONTRACT = (
 
 
 def _trader_deterministic_checks(text: str, parsed):
-    findings = check_text_relational_and_unit_errors(text)
+    # Relational-error scanning stays as-is (narrative "X is below Y"
+    # contradictions); unit-error scanning uses the narrow, field-line-based
+    # check instead of the generic sentence-wide one -- a descriptive stop-
+    # distance percentage in reasoning/prose ("25 pts, ~2.16% of current
+    # price") is not a contractual Entry Price/Stop Loss stated as a bare
+    # percentage, and must never be flagged as one (real-run regression).
+    findings = check_relational_errors(text)
+    findings += check_price_field_percentage(text)
     if parsed is not None and parsed.entry_price is not None:
         finding = check_entry_stop_direction(parsed.action.value, parsed.entry_price, parsed.stop_loss)
         if finding is not None:
