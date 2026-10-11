@@ -654,6 +654,66 @@ same ticker/date/analysts/depth/language.
   unaffected and never receive an unrecognized parameter. The effective value
   actually sent (or its absence) is visible per call with `--trace-llm`.
 
+### Benchmark replay
+
+**This is a controlled model comparison using frozen traced inputs. It does
+not rerun tools or the trading pipeline.** It reuses the request already
+captured by a `--trace-llm` run — same messages, same structured-output
+contract, same evidence — and replays it against one or more different
+models, changing only model/reasoning_effort/seed.
+
+**What it compares**: for a chosen stage, the exact serialized request of
+its FINAL synthesis call (the one that already has every tool result folded
+into the message history), sent unchanged to each model under test.
+
+**What it does NOT compare or do**: it never re-executes a tool (real
+data-fetching tools from the source call are never bound to the replay
+call), never regenerates a prompt from `AgentState`, never writes to the
+source run, and never runs any downstream stage. There is no scoring or
+"winner" — it produces comparable outputs and objective metrics
+(tokens/elapsed time/structured-success) only; judging them is a separate,
+later step.
+
+**Supported stages** (first scope): Market, Sentiment, News, and
+Fundamentals Analyst, and Research Manager. Bull/Bear, Research Verifier,
+Trader, Risk, Portfolio Manager, and Validator are not yet supported.
+
+```bash
+tradingagents benchmark-models \
+  --from-run ./retest/hybrid-paid-v1/01-LLY-300000003 \
+  --stages market,sentiment,news,fundamentals,research_manager \
+  --model "qwen3.8-flash-next:125b-a6b-q4_K_M@medium" \
+  --model "deepseek-v4.1-flash:cloud@high" \
+  --model "gemma4:26b" \
+  --output-dir ./retest/model-benchmark-v1
+```
+
+`--from-run` is the run's own output folder (containing `<ticker>/debug/`
+from that run's `--trace-llm`). `--model` is repeatable; a model name may
+contain `:` freely (e.g. `qwen3.8-flash-next:125b-a6b-q4_K_M`) — only `@`
+introduces an optional reasoning effort, never `:`. `--seed` derives a
+stable seed per (stage, model) pair, the same `derive_call_seed` algorithm
+the pipeline itself uses; omit it to reuse each source call's own original
+seed instead. `--provider` applies to every model in the benchmark,
+defaulting to the source run's own configured provider.
+
+Output tree:
+
+```
+<output-dir>/
+  manifest.json
+  summary.json
+  <Stage_Name>/
+    <model-spec-safe-name>/
+      request.json
+      response.txt   (or response.json for a structured result)
+      metadata.json
+```
+
+`summary.json` lists, per (stage, model): source run/ticker/call identity,
+model, reasoning effort, seed, elapsed time, input/output/total tokens,
+structured success/fallback, parse success, and any error.
+
 ### Risk as independent assessment, not a second debate
 
 Real validation runs (GLD, NVDA, SPY) showed the Risk phase behaving like a

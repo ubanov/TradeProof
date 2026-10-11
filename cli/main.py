@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import typer
+from rich.markup import escape as _esc
 
 from cli.display import ANALYST_ORDER, console
 from cli.headless import (
@@ -17,6 +18,12 @@ from cli.headless import (
 )
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
+from tradingagents.benchmark_replay import (
+    SUPPORTED_STAGES,
+    ReplayError,
+    parse_model_spec,
+    run_benchmark,
+)
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.portfolio import load_portfolio
 from tradingagents.run_seed import resolve_base_seed, validate_configured_seed
@@ -533,6 +540,125 @@ def backtest(
         console.print(f"[yellow]failed:[/yellow] {ticker} {date}: {reason}")
     for ticker, reason in result.settlement_failures:
         console.print(f"[yellow]unsettled:[/yellow] {ticker}: {reason}")
+
+
+@app.command("benchmark-models")
+def benchmark_models(
+    from_run: Path = typer.Option(  # noqa: B008 - Typer option declaration
+        ..., "--from-run", help="A --trace-llm run directory (containing <ticker>/debug/)."
+    ),
+    stages: str = typer.Option(
+        ..., "--stages",
+        help=(
+            f"Comma-separated stages to replay. Supported: {', '.join(SUPPORTED_STAGES)}."
+        ),
+    ),
+    models: list[str] = typer.Option(  # noqa: B008 - Typer option declaration
+        ..., "--model",
+        help=(
+            'Model spec, repeatable (--model A --model B ...): "<model>" or '
+            '"<model>@<reasoning_effort>". Model names may contain \':\' freely -- '
+            'only \'@\' introduces a reasoning effort, e.g. '
+            '"qwen3.8-flash-next:125b-a6b-q4_K_M@medium".'
+        ),
+    ),
+    output_dir: Path = typer.Option(  # noqa: B008 - Typer option declaration
+        ..., "--output-dir", help="Where to save the benchmark output tree."
+    ),
+    seed: int | None = typer.Option(
+        None, "--seed",
+        help=(
+            "Base seed for stable, derived per-(stage, model) seeds. Omit to reuse each "
+            "source call's own original seed (same value for every model compared)."
+        ),
+    ),
+    provider: str | None = typer.Option(
+        None, "--provider",
+        help="LLM provider for every model in this benchmark (defaults to the configured provider).",
+    ),
+    ticker: str | None = typer.Option(
+        None, "--ticker", help="Disambiguate when --from-run contains more than one ticker's trace."
+    ),
+):
+    """Controlled, read-only model comparison on frozen traced inputs.
+
+    Replays the FINAL synthesis call of one or more supported stages from an
+    already-completed --trace-llm run against different models, changing
+    only model/reasoning_effort/seed -- same messages, same structured-
+    output contract, same evidence. Never executes tools, never writes to
+    the source run, never runs any downstream stage. See fork README:
+    "Benchmark replay".
+    """
+    stage_keys = [s.strip() for s in stages.split(",") if s.strip()]
+    if not stage_keys:
+        console.print("[red]No stage given; pass one or more via --stages, comma-separated.[/red]")
+        raise typer.Exit(code=1)
+    unsupported = [s for s in stage_keys if s not in SUPPORTED_STAGES]
+    if unsupported:
+        console.print(
+            f"[red]Unsupported stage(s): {', '.join(unsupported)}. "
+            f"Supported: {', '.join(SUPPORTED_STAGES)}.[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        model_specs = [parse_model_spec(m) for m in models]
+    except ReplayError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    try:
+        summary = run_benchmark(
+            from_run=from_run, stage_keys=stage_keys, model_specs=model_specs,
+            output_dir=output_dir, base_seed=seed, provider=provider, ticker=ticker,
+        )
+    except ReplayError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    # Two independent Rich features can mangle a raw model/stage/error string:
+    # (1) [tag]-style markup, guarded here by _esc() on every interpolated
+    # value; (2) ":word:" emoji-shortcode substitution -- unrelated to
+    # markup escaping -- which turns a model spec's own "...flash:cloud"
+    # immediately followed by this function's ": " separator into the
+    # literal substring ":cloud:" and renders it as an actual unicode
+    # character. That character then fails to encode on a legacy Windows
+    # console's codepage, a real crash observed on an otherwise-successful
+    # benchmark's own summary line. emoji=False on every print below
+    # disables that substitution; the [red]/[yellow] tags still work since
+    # markup parsing stays on.
+    console.print(f"Source run: {summary['source_run']} (ticker {summary['ticker']})", emoji=False)
+    console.print(f"Summary: {Path(output_dir) / 'summary.json'}", emoji=False)
+    failed = False
+    for entry in summary["results"]:
+        if entry.get("status") == "unsupported_for_replay":
+            console.print(
+                f"[yellow]{_esc(entry['stage'])}: unsupported_for_replay ({_esc(entry['reason'])})[/yellow]",
+                emoji=False,
+            )
+            continue
+        mode = entry.get("output_mode", "?")
+        if entry.get("status") == "success":
+            console.print(
+                f"{_esc(entry['stage'])}/{_esc(entry['model'])}: {_esc(mode)}, "
+                f"{entry.get('total_tokens')} tokens, {entry.get('elapsed_seconds')}s",
+                emoji=False,
+            )
+        else:
+            console.print(
+                f"[red]{_esc(entry['stage'])}/{_esc(entry['model'])}: {_esc(mode)}, "
+                f"error: {_esc(str(entry.get('error')))}[/red]",
+                emoji=False,
+            )
+            failed = True
+
+    console.print(
+        f"Benchmark completed in {format_duration(summary['benchmark_wall_elapsed_seconds'])}", emoji=False
+    )
+    for model, elapsed in summary.get("elapsed_seconds_total_by_model", {}).items():
+        console.print(f"  {_esc(model)}: {format_duration(elapsed)}", emoji=False)
+    if failed:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

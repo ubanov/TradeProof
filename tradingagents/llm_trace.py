@@ -268,6 +268,13 @@ def _serialize_message(msg: Any) -> dict:
     name = getattr(msg, "name", None)
     if name:
         data["name"] = name
+    # Only ToolMessage carries this -- needed to correlate a tool result back
+    # to the specific tool_call it answers (see fork README: "Benchmark
+    # replay"). A trace captured before this field existed has no value
+    # here; a replay consumer falls back to positional inference in that case.
+    tool_call_id = getattr(msg, "tool_call_id", None)
+    if tool_call_id:
+        data["tool_call_id"] = tool_call_id
     return data
 
 
