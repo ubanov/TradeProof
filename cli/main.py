@@ -607,10 +607,44 @@ def benchmark_models(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
 
+    # A benchmark can run for 30-60+ minutes with no output at all otherwise
+    # (every model call is sequential and blocking) -- echo() reuses the
+    # SAME timestamp utility the rest of the CLI already uses for headless
+    # runs (timestamped_echo, "YYYY-MM-DD HH:MM:SS " prefix) rather than a
+    # new parallel format, printing through console.print so the existing
+    # emoji=False/_esc() protections (see below) still apply to every line.
+    echo = timestamped_echo(lambda msg: console.print(msg, emoji=False))
+
+    def _on_progress(event: dict) -> None:
+        phase = event.get("phase")
+        if phase == "source_resolved":
+            echo(f"Benchmark source: {_esc(event['ticker'])} / {_esc(Path(from_run).name)}")
+            return
+        if phase == "unsupported":
+            echo(f"[{_esc(event['stage'])}] unsupported_for_replay ({_esc(event['reason'])})")
+            return
+        label = f"{_esc(event['stage'])} / {_esc(event['model'])}"
+        if event.get("reasoning_effort"):
+            label += f" @ {_esc(event['reasoning_effort'])}"
+        prefix = f"[{event['index']}/{event['total']}]"
+        if phase == "start":
+            echo(f"{prefix} Starting {label}")
+        elif phase == "finish":
+            echo(
+                f"{prefix} Finished {label} -- {_esc(str(event.get('output_mode')))} -- "
+                f"{format_duration(event.get('elapsed_seconds') or 0)} -- {event.get('total_tokens')} tokens"
+            )
+        elif phase == "error":
+            echo(
+                f"{prefix} ERROR {label} -- {_esc(str(event.get('error')))} -- "
+                f"{format_duration(event.get('elapsed_seconds') or 0)}"
+            )
+
     try:
         summary = run_benchmark(
             from_run=from_run, stage_keys=stage_keys, model_specs=model_specs,
             output_dir=output_dir, base_seed=seed, provider=provider, ticker=ticker,
+            on_progress=_on_progress,
         )
     except ReplayError as exc:
         console.print(f"[red]{exc}[/red]")

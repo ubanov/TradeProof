@@ -12,10 +12,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 
 import tradingagents.benchmark_replay as br
 from tradingagents.benchmark_replay import (
     ReplayError,
+    _normalize_tool_history,
     _safe_path_component,
     find_source_call,
     parse_model_spec,
@@ -140,23 +142,45 @@ def _build_trace(tmp_path: Path, ticker: str = "LLY") -> Path:
 
 
 class _FakeLLM:
-    """No structured support unless given a schema; records every call."""
+    """No structured support unless given a schema; records every call.
 
-    def __init__(self, response_text="free-text response", reenter_tool_mode=False, structured_fails=False):
+    ``reenter_tool_mode`` only fires when the invocation actually carries a
+    ``tools`` kwarg -- a model cannot attempt a tool call when none is
+    declared, so this mirrors the real failure mode (a provider ignoring
+    ``tool_choice="none"`` while ``tools`` is still present) rather than an
+    unconditional one. ``retry_response_text``, when set, is the text
+    returned specifically on a call made WITHOUT ``tools`` (i.e. the
+    tool-history-normalized retry) -- letting a test simulate a model that
+    fails with tools bound but can synthesize fine once they're stripped.
+    """
+
+    def __init__(
+        self, response_text="free-text response", reenter_tool_mode=False,
+        structured_fails=False, retry_response_text=None,
+    ):
         self.response_text = response_text
         self.reenter_tool_mode = reenter_tool_mode
         self.structured_fails = structured_fails
+        self.retry_response_text = retry_response_text
         self.invoke_calls: list[dict] = []
         self.structured_calls: list[dict] = []
 
     def invoke(self, messages, **kwargs):
         self.invoke_calls.append({"messages": messages, "kwargs": kwargs})
-        tool_calls = [{"name": "get_news", "args": {}, "id": "call_x", "type": "tool_call"}] if self.reenter_tool_mode else None
+        has_tools = "tools" in kwargs
+        if self.reenter_tool_mode and has_tools:
+            return SimpleNamespace(
+                content="",
+                tool_calls=[{"name": "get_news", "args": {}, "id": "call_x", "type": "tool_call"}],
+                usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                response_metadata={"finish_reason": "tool_calls"},
+            )
+        text = self.response_text if (has_tools or self.retry_response_text is None) else self.retry_response_text
         return SimpleNamespace(
-            content=self.response_text,
-            tool_calls=tool_calls,
+            content=text,
+            tool_calls=None,
             usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
-            response_metadata={"finish_reason": "tool_calls" if self.reenter_tool_mode else "stop"},
+            response_metadata={"finish_reason": "stop"},
         )
 
     def with_structured_output(self, schema, include_raw=False):
@@ -677,8 +701,11 @@ def test_news_4_prior_tool_result_messages_remain_in_frozen_messages(tmp_path):
 @pytest.mark.unit
 def test_news_5_model_cannot_trigger_a_real_tool_during_replay(tmp_path, fake_llm_factory):
     """Even when the fake model "wants" to call a tool (simulating a
-    tool-trained model ignoring tool_choice="none"), no tool is executed --
-    the result is reported as an explicit error, never executed."""
+    tool-trained model ignoring tool_choice="none"), no tool is executed.
+    Here the tools-free retry (see _normalize_tool_history) ALSO fails --
+    the retry's own response is empty -- so the overall result is still an
+    explicit error, reached via the normalized retry path, never by
+    accepting the tool-call attempt as text."""
     run_dir, _ = _build_tool_loop_trace(tmp_path)
     fake_llm_factory.per_model["fake-model"] = {"reenter_tool_mode": True, "response_text": ""}
     summary = run_benchmark(
@@ -687,7 +714,8 @@ def test_news_5_model_cannot_trigger_a_real_tool_during_replay(tmp_path, fake_ll
     )
     entry = summary["results"][0]
     assert entry["status"] == "error"
-    assert "no tool was executed" in entry["error"]
+    assert entry["replay_input_mode"] == "tool_history_normalized"
+    assert "tools-free retry" in entry["error"]
     assert not (tmp_path / "out" / "News_Analyst" / "fake-model" / "response.txt").exists()
 
 
@@ -954,3 +982,270 @@ def test_output_dir_5_existing_files_are_not_modified(tmp_path, fake_llm_factory
         )
     assert leftover.read_bytes() == original_bytes
     assert list(out_dir.iterdir()) == [leftover]
+
+
+# --- Progress reporting 1-6: visible progress during a long benchmark ---
+
+
+@pytest.mark.unit
+def test_progress_1_start_is_reported_before_the_llm_is_called(tmp_path, fake_llm_factory):
+    run_dir = _build_trace(tmp_path)
+    events: list[dict] = []
+    created_at_start: list[int] = []
+
+    def _on_progress(event: dict) -> None:
+        if event.get("phase") == "start":
+            # Snapshot taken INSIDE the callback, before replay_one runs --
+            # a post-hoc check after run_benchmark returns would always see
+            # the client already created, regardless of ordering.
+            created_at_start.append(len(fake_llm_factory.created))
+        events.append(event)
+
+    run_benchmark(
+        from_run=run_dir, stage_keys=["market"], model_specs=[parse_model_spec("fake-model")],
+        output_dir=tmp_path / "out", on_progress=_on_progress,
+    )
+    start_events = [e for e in events if e.get("phase") == "start"]
+    assert len(start_events) == 1
+    assert created_at_start == [0]
+
+
+@pytest.mark.unit
+def test_progress_2_finish_is_reported_after_the_llm_call(tmp_path, fake_llm_factory):
+    run_dir = _build_trace(tmp_path)
+    events: list[dict] = []
+    run_benchmark(
+        from_run=run_dir, stage_keys=["market"], model_specs=[parse_model_spec("fake-model")],
+        output_dir=tmp_path / "out", on_progress=events.append,
+    )
+    finish_events = [e for e in events if e.get("phase") == "finish"]
+    assert len(finish_events) == 1
+    assert finish_events[0]["output_mode"] == "free_text"
+    assert finish_events[0]["total_tokens"] == 15
+    # The client was already created and used by the time "finish" fired.
+    assert len(fake_llm_factory.created) == 1
+
+
+@pytest.mark.unit
+def test_progress_3_error_is_reported_on_failure(tmp_path, fake_llm_factory):
+    run_dir = _build_trace(tmp_path)
+    fake_llm_factory.per_model["fake-model"] = {"response_text": ""}
+    events: list[dict] = []
+    run_benchmark(
+        from_run=run_dir, stage_keys=["market"], model_specs=[parse_model_spec("fake-model")],
+        output_dir=tmp_path / "out", on_progress=events.append,
+    )
+    error_events = [e for e in events if e.get("phase") == "error"]
+    assert len(error_events) == 1
+    assert error_events[0]["error"]
+    assert not any(e.get("phase") == "finish" for e in events)
+
+
+@pytest.mark.unit
+def test_progress_4_every_cli_progress_line_has_a_timestamp(tmp_path, fake_llm_factory):
+    import re
+
+    from typer.testing import CliRunner
+
+    from cli.main import app
+
+    run_dir = _build_trace(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(app, [
+        "benchmark-models", "--from-run", str(run_dir), "--stages", "market",
+        "--model", "fake-model", "--output-dir", str(tmp_path / "out"),
+    ])
+    assert result.exit_code == 0, result.output
+    stamp_re = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} ")
+    progress_lines = [
+        line for line in result.output.splitlines()
+        if "Benchmark source:" in line or "Starting" in line or "Finished" in line or "ERROR" in line
+    ]
+    assert progress_lines
+    assert all(stamp_re.match(line) for line in progress_lines)
+
+
+@pytest.mark.unit
+def test_progress_5_counter_n_of_total_is_correct(tmp_path, fake_llm_factory):
+    run_dir = _build_trace(tmp_path)
+    events: list[dict] = []
+    run_benchmark(
+        from_run=run_dir, stage_keys=["market", "sentiment"],
+        model_specs=[parse_model_spec("model-a"), parse_model_spec("model-b")],
+        output_dir=tmp_path / "out", on_progress=events.append,
+    )
+    start_events = [e for e in events if e.get("phase") == "start"]
+    assert [e["total"] for e in start_events] == [4, 4, 4, 4]
+    assert [e["index"] for e in start_events] == [1, 2, 3, 4]
+
+
+@pytest.mark.unit
+def test_progress_6_never_prints_the_full_prompt_or_response(tmp_path, fake_llm_factory):
+    from typer.testing import CliRunner
+
+    from cli.main import app
+
+    run_dir = _build_trace(tmp_path)
+    distinctive_response = "VERY-LONG-DISTINCTIVE-RESPONSE-BODY-" + ("x" * 500)
+    fake_llm_factory.per_model["fake-model"] = {"response_text": distinctive_response}
+    runner = CliRunner()
+    result = runner.invoke(app, [
+        "benchmark-models", "--from-run", str(run_dir), "--stages", "market",
+        "--model", "fake-model", "--output-dir", str(tmp_path / "out"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert distinctive_response not in result.output
+    for line in result.output.splitlines():
+        assert len(line) < 300
+
+
+# --- Tool-history replay 7-15: safe synthesis when a provider ignores ---
+# --- tool_choice="none" and still attempts a real tool call -------------
+
+
+@pytest.mark.unit
+def test_toolhistory_7_provider_honoring_tool_choice_none_stays_exact(tmp_path, fake_llm_factory):
+    run_dir, _ = _build_tool_loop_trace(tmp_path)
+    summary = run_benchmark(
+        from_run=run_dir, stage_keys=["news"], model_specs=[parse_model_spec("fake-model")],
+        output_dir=tmp_path / "out",
+    )
+    entry = summary["results"][0]
+    assert entry["status"] == "success"
+    assert entry["replay_input_mode"] == "exact"
+    assert entry["tool_history_detail"] is None
+    llm = fake_llm_factory.llms[0]
+    assert len(llm.invoke_calls) == 1
+
+
+@pytest.mark.unit
+def test_toolhistory_8_provider_ignoring_tool_choice_none_never_executes_a_tool(tmp_path, fake_llm_factory):
+    """The model tries to call a tool on the first attempt despite
+    tool_choice="none" -- this module has no code path that dispatches a
+    real tool function, on either attempt, so there is structurally
+    nothing to execute; the retry is made with NO ``tools`` parameter."""
+    run_dir, _ = _build_tool_loop_trace(tmp_path)
+    fake_llm_factory.per_model["fake-model"] = {
+        "reenter_tool_mode": True, "response_text": "", "retry_response_text": "Synthesized without tools.",
+    }
+    run_benchmark(
+        from_run=run_dir, stage_keys=["news"], model_specs=[parse_model_spec("fake-model")],
+        output_dir=tmp_path / "out",
+    )
+    llm = fake_llm_factory.llms[0]
+    assert len(llm.invoke_calls) == 2
+    assert "tools" not in llm.invoke_calls[1]["kwargs"]
+
+
+@pytest.mark.unit
+def test_toolhistory_9_a_safe_tools_free_synthesis_route_exists(tmp_path, fake_llm_factory):
+    run_dir, _ = _build_tool_loop_trace(tmp_path)
+    fake_llm_factory.per_model["fake-model"] = {
+        "reenter_tool_mode": True, "response_text": "", "retry_response_text": "Synthesized without tools.",
+    }
+    summary = run_benchmark(
+        from_run=run_dir, stage_keys=["news"], model_specs=[parse_model_spec("fake-model")],
+        output_dir=tmp_path / "out",
+    )
+    entry = summary["results"][0]
+    assert entry["status"] == "success"
+    assert entry["replay_input_mode"] == "tool_history_normalized"
+    response_path = tmp_path / "out" / "News_Analyst" / "fake-model" / "response.txt"
+    assert response_path.read_text(encoding="utf-8") == "Synthesized without tools."
+
+
+@pytest.mark.unit
+def test_toolhistory_10_tool_result_text_is_preserved_verbatim(tmp_path):
+    run_dir, _ = _build_tool_loop_trace(tmp_path)
+    debug_dir, _ = resolve_debug_dir(run_dir)
+    call = find_source_call(debug_dir, "news")
+    recon = reconstruct_messages(call.messages)
+    normalized = _normalize_tool_history(recon.messages)
+    combined = "\n".join(m.content for m in normalized.messages)
+    assert "headline batch 1" in combined
+    assert "headline batch 2" in combined
+
+
+@pytest.mark.unit
+def test_toolhistory_11_no_evidence_content_is_lost(tmp_path):
+    run_dir, _ = _build_tool_loop_trace(tmp_path)
+    debug_dir, _ = resolve_debug_dir(run_dir)
+    call = find_source_call(debug_dir, "news")
+    recon = reconstruct_messages(call.messages)
+    original_tool_contents = [m.content for m in recon.messages if isinstance(m, ToolMessage)]
+    normalized = _normalize_tool_history(recon.messages)
+    combined = "\n".join(m.content for m in normalized.messages)
+    for original in original_tool_contents:
+        assert original in combined
+
+
+@pytest.mark.unit
+def test_toolhistory_12_metadata_reports_exact_vs_normalized(tmp_path, fake_llm_factory):
+    run_dir, _ = _build_tool_loop_trace(tmp_path)
+    summary_exact = run_benchmark(
+        from_run=run_dir, stage_keys=["news"], model_specs=[parse_model_spec("exact-model")],
+        output_dir=tmp_path / "out-exact",
+    )
+    assert summary_exact["results"][0]["replay_input_mode"] == "exact"
+    assert summary_exact["results"][0]["tool_history_detail"] is None
+
+    fake_llm_factory.per_model["normalized-model"] = {
+        "reenter_tool_mode": True, "response_text": "", "retry_response_text": "Synthesized.",
+    }
+    summary_normalized = run_benchmark(
+        from_run=run_dir, stage_keys=["news"], model_specs=[parse_model_spec("normalized-model")],
+        output_dir=tmp_path / "out-normalized",
+    )
+    entry = summary_normalized["results"][0]
+    assert entry["replay_input_mode"] == "tool_history_normalized"
+    assert entry["tool_history_detail"]
+    assert "tool-call round" in entry["tool_history_detail"]
+
+
+@pytest.mark.unit
+def test_toolhistory_13_normalized_history_has_no_tool_call_shaped_messages_left(tmp_path):
+    run_dir, _ = _build_tool_loop_trace(tmp_path)
+    debug_dir, _ = resolve_debug_dir(run_dir)
+    call = find_source_call(debug_dir, "news")
+    recon = reconstruct_messages(call.messages)
+    normalized = _normalize_tool_history(recon.messages)
+    assert not any(isinstance(m, ToolMessage) for m in normalized.messages)
+    assert not any(isinstance(m, AIMessage) and m.tool_calls for m in normalized.messages)
+
+
+@pytest.mark.unit
+def test_toolhistory_14_empty_normalized_retry_response_is_still_an_error(tmp_path, fake_llm_factory):
+    run_dir, _ = _build_tool_loop_trace(tmp_path)
+    fake_llm_factory.per_model["fake-model"] = {
+        "reenter_tool_mode": True, "response_text": "", "retry_response_text": "",
+    }
+    summary = run_benchmark(
+        from_run=run_dir, stage_keys=["news"], model_specs=[parse_model_spec("fake-model")],
+        output_dir=tmp_path / "out",
+    )
+    entry = summary["results"][0]
+    assert entry["status"] == "error"
+    assert entry["replay_input_mode"] == "tool_history_normalized"
+    assert not (tmp_path / "out" / "News_Analyst" / "fake-model" / "response.txt").exists()
+
+
+@pytest.mark.unit
+def test_toolhistory_15_deepseek_msft_equivalent_succeeds_without_executable_tools(tmp_path, fake_llm_factory):
+    """Reproduces the real DeepSeek/MSFT News regression: the model ignores
+    tool_choice="none" and re-enters tool mode on the exact attempt, but can
+    synthesize a real answer once no ``tools`` are offered at all."""
+    run_dir, _ = _build_tool_loop_trace(tmp_path)
+    fake_llm_factory.per_model["fake-model"] = {
+        "reenter_tool_mode": True, "response_text": "",
+        "retry_response_text": "Final MSFT news synthesis, no tools needed.",
+    }
+    summary = run_benchmark(
+        from_run=run_dir, stage_keys=["news"], model_specs=[parse_model_spec("fake-model")],
+        output_dir=tmp_path / "out",
+    )
+    entry = summary["results"][0]
+    assert entry["status"] == "success"
+    assert entry["output_mode"] == "free_text"
+    assert entry["replay_input_mode"] == "tool_history_normalized"
+    response_path = tmp_path / "out" / "News_Analyst" / "fake-model" / "response.txt"
+    assert response_path.read_text(encoding="utf-8") == "Final MSFT news synthesis, no tools needed."

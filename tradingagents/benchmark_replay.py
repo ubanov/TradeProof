@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -334,6 +335,89 @@ def reconstruct_messages(raw_messages: list[dict]) -> ReconstructedMessages:
 
 
 # ---------------------------------------------------------------------------
+# Tool-history normalization -- a deterministic, lossless-for-tool-results
+# fallback used only when a provider does not honor tool_choice="none" and
+# still attempts a real tool call during replay (real-run regression: a
+# MSFT News Analyst replay against deepseek-v4.1-flash:cloud kept returning
+# finish_reason="tool_calls" even with tool_choice="none" sent -- the
+# provider/model simply ignored it). Collapses every AIMessage(tool_calls=
+# ...) + ToolMessage(...) pair into plain System/Human/AI turns that never
+# require a ``tools`` parameter to be valid, so there is nothing left for
+# the model to call.
+# ---------------------------------------------------------------------------
+
+
+def _render_tool_calls(tool_calls: list[dict]) -> str:
+    """Deterministic text restatement of an AIMessage's own recorded
+    ``tool_calls`` -- never invents an argument, just restates the SAME
+    structured data the trace already captured."""
+    rendered = []
+    for call in tool_calls:
+        name = call.get("name", "?")
+        args = call.get("args") or {}
+        args_text = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        rendered.append(f"{name}({args_text})")
+    return "[Tool call(s) recorded in the original trace: " + "; ".join(rendered) + "]"
+
+
+@dataclass(frozen=True)
+class NormalizedHistory:
+    messages: list[BaseMessage]
+    rounds_collapsed: int
+    tool_messages_converted: int
+
+    def detail(self) -> str:
+        return (
+            f"collapsed {self.rounds_collapsed} tool-call round(s) and "
+            f"{self.tool_messages_converted} tool-result message(s) into plain "
+            "System/Human/AI turns (no 'tools' parameter sent); every tool "
+            "result's text content is preserved verbatim"
+        )
+
+
+def _normalize_tool_history(messages: list[BaseMessage]) -> NormalizedHistory:
+    """Flattens a frozen AIMessage(tool_calls=...) + ToolMessage(...) history
+    into plain turns with strict System/Human/AI alternation, so the request
+    never needs a ``tools`` parameter at all -- nothing declared, nothing to
+    call. Every ToolMessage's ``content`` is carried over byte-for-byte (just
+    relabeled from a ``tool``-role message into a ``human``-role one with a
+    clear prefix); an AIMessage with tool_calls keeps its own original text
+    content (if any) and gains a deterministic restatement of what it called.
+    Never drops or rewrites a tool result's actual text.
+    """
+    normalized: list[BaseMessage] = []
+    rounds_collapsed = 0
+    tool_messages_converted = 0
+    pending_tool_lines: list[str] = []
+
+    def _flush_pending() -> None:
+        if pending_tool_lines:
+            normalized.append(HumanMessage(content="\n\n".join(pending_tool_lines)))
+            pending_tool_lines.clear()
+
+    for message in messages:
+        if isinstance(message, ToolMessage):
+            label = message.name or message.tool_call_id or "tool"
+            pending_tool_lines.append(f"[Tool result -- {label}]\n{message.content}")
+            tool_messages_converted += 1
+            continue
+        _flush_pending()
+        if isinstance(message, AIMessage) and message.tool_calls:
+            original_text = (message.content or "").strip()
+            rendering = _render_tool_calls(message.tool_calls)
+            content = f"{original_text}\n{rendering}" if original_text else rendering
+            normalized.append(AIMessage(content=content))
+            rounds_collapsed += 1
+            continue
+        normalized.append(message)
+    _flush_pending()
+
+    return NormalizedHistory(
+        messages=normalized, rounds_collapsed=rounds_collapsed, tool_messages_converted=tool_messages_converted,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Replay invocation -- preserves structured/free-text shape, never executes
 # a real tool, always seed-aware when the provider supports it.
 # ---------------------------------------------------------------------------
@@ -358,6 +442,37 @@ class ReplayOutcome:
     finish_reason: str | None
     usage: dict | None
     error: str | None
+    replay_input_mode: str = "exact"  # "exact" | "tool_history_normalized"
+    tool_history_detail: str | None = None
+
+
+def _free_text_attempt(
+    llm: Any, messages: list[BaseMessage], kwargs: dict[str, Any], tools: list[dict] | None,
+) -> dict[str, Any]:
+    """One free-text invocation attempt. Binds ``tools`` (unchanged, from
+    the source call) with ``tool_choice="none"`` when present; passing
+    ``tools=None`` sends no ``tools`` parameter at all. Never raises --
+    any provider/model exception is captured and reported, not propagated."""
+    invoke_kwargs = dict(kwargs)
+    if tools:
+        invoke_kwargs["tools"] = tools
+        invoke_kwargs["tool_choice"] = "none"
+    try:
+        response = llm.invoke(messages, **invoke_kwargs)
+    except Exception as exc:  # noqa: BLE001 - provider/model failure, reported not raised
+        return {"error": str(exc)}
+    usage = getattr(response, "usage_metadata", None)
+    finish_reason = (getattr(response, "response_metadata", None) or {}).get("finish_reason")
+    text = getattr(response, "content", None)
+    # The model asked for a tool anyway (despite tool_choice="none", or
+    # despite no tools being offered at all) -- never executed, but also
+    # never silently accepted as a valid comparison output.
+    reentered_tool_mode = bool(getattr(response, "tool_calls", None)) or finish_reason == "tool_calls"
+    return {
+        "error": None, "usage": usage, "finish_reason": finish_reason, "text": text,
+        "reentered_tool_mode": reentered_tool_mode,
+        "text_is_usable": bool((text or "").strip()) and not reentered_tool_mode,
+    }
 
 
 def _invoke_replay(
@@ -384,14 +499,21 @@ def _invoke_replay(
     the model's own system prompt usually still says "you have access to
     the following tools", and a tool-trained model given that text with NO
     ``tools`` parameter at all can get confused and emit an empty,
-    tool-call-shaped response instead of answering (real-run regression) --
-    binding the SAME tools but forbidding their use keeps the model's
-    environment consistent with what it's told, without ever risking
-    execution (``tool_choice="none"`` is a hard request-level instruction;
-    even if a model ignored it, no tool call is ever executed by this
-    module on any path). If the model still returns an empty response or a
-    populated ``tool_calls`` despite this, that is reported as an explicit
-    error, never silently accepted as a successful empty comparison.
+    tool-call-shaped response instead of answering (real-run regression).
+
+    Some providers/models do not actually honor ``tool_choice="none"`` --
+    a real MSFT News Analyst replay against deepseek-v4.1-flash:cloud kept
+    returning ``finish_reason="tool_calls"`` even with it set (verified by
+    inspecting the saved replay request: the frozen history ends on a tool
+    result, ``tool_choice="none"`` was sent, and the model still re-entered
+    tool mode -- a provider/model limitation, not a bug in how this module
+    builds the request). When that happens -- ``tool_choice="none"`` sent
+    but ignored -- this retries EXACTLY ONCE against the SAME frozen
+    history with every AIMessage(tool_calls=...)/ToolMessage pair collapsed
+    into plain System/Human/AI turns (see ``_normalize_tool_history``), so
+    the retried request has no ``tools`` parameter at all -- nothing left
+    to call. No tool is ever executed on either attempt; a tool call is
+    always reported as an error, never accepted as text.
     """
     kwargs: dict[str, Any] = {}
     if seed is not None and provider.lower() in SEED_CAPABLE_PROVIDERS:
@@ -429,48 +551,79 @@ def _invoke_replay(
                     )
                 structured_error = str(parsing_error) if parsing_error else "structured output returned no parsed result"
 
-    invoke_kwargs = dict(kwargs)
-    if not structured_attempted and tools:
-        invoke_kwargs["tools"] = tools
-        invoke_kwargs["tool_choice"] = "none"
+    attempt_tools = None if structured_attempted else tools
+    attempt = _free_text_attempt(llm, messages, kwargs, attempt_tools)
+    replay_input_mode = "exact"
+    tool_history_detail: str | None = None
 
-    try:
-        response = llm.invoke(messages, **invoke_kwargs)
-    except Exception as exc:  # noqa: BLE001 - provider/model failure, reported not raised
+    needs_retry = bool(attempt_tools) and (
+        attempt.get("error") is not None or attempt.get("reentered_tool_mode")
+    )
+    if needs_retry:
+        normalized = _normalize_tool_history(messages)
+        retry = _free_text_attempt(llm, normalized.messages, kwargs, None)
+        replay_input_mode = "tool_history_normalized"
+        tool_history_detail = normalized.detail()
+        # The ORIGINAL (exact) attempt's own failure reason is preserved for
+        # the error message below when the retry fails too -- "both the
+        # exact and the tools-free retry failed" is more useful than only
+        # the retry's own (possibly unrelated) failure.
+        original_attempt = attempt
+        attempt = retry
+    else:
+        original_attempt = None
+
+    if attempt.get("error") is not None:
+        error_message = attempt["error"]
+        if original_attempt is not None:
+            prior = (
+                "model attempted to call a tool during replay despite tool_choice='none'"
+                if original_attempt.get("reentered_tool_mode")
+                else original_attempt.get("error")
+            )
+            error_message = f"{prior}; tools-free retry then failed: {error_message}"
         return ReplayOutcome(
             structured_attempted=structured_attempted, structured_success=False,
             fallback_triggered=structured_attempted, fallback_success=False,
             output_mode="error", status="error", parsed=None, text=None,
-            finish_reason=None, usage=None, error=str(exc),
+            finish_reason=None, usage=None, error=error_message,
+            replay_input_mode=replay_input_mode, tool_history_detail=tool_history_detail,
         )
 
-    usage = getattr(response, "usage_metadata", None)
-    finish_reason = (getattr(response, "response_metadata", None) or {}).get("finish_reason")
-    text = getattr(response, "content", None)
-    # The model asked for a tool anyway (despite tool_choice="none", or
-    # despite no schema being bound at all) -- never executed, but also
-    # never silently accepted as a valid comparison output.
-    reentered_tool_mode = bool(getattr(response, "tool_calls", None)) or finish_reason == "tool_calls"
-    text_is_usable = bool((text or "").strip()) and not reentered_tool_mode
+    usage = attempt.get("usage")
+    finish_reason = attempt.get("finish_reason")
+    text = attempt.get("text")
 
-    if text_is_usable:
+    if attempt["text_is_usable"]:
         output_mode = "fallback" if structured_attempted else "free_text"
         return ReplayOutcome(
             structured_attempted=structured_attempted, structured_success=False,
             fallback_triggered=structured_attempted, fallback_success=structured_attempted,
             output_mode=output_mode, status="success", parsed=None, text=text,
             finish_reason=finish_reason, usage=usage, error=None,
+            replay_input_mode=replay_input_mode, tool_history_detail=tool_history_detail,
         )
 
-    if reentered_tool_mode:
+    if attempt["reentered_tool_mode"]:
         error_message = "model attempted to call a tool during replay; no tool was executed"
+        if original_attempt is not None:
+            error_message = (
+                "model attempted to call a tool during replay even after the tools-free "
+                "retry; no tool was executed"
+            )
     else:
         error_message = structured_error or "empty response"
+        if original_attempt is not None and original_attempt.get("reentered_tool_mode"):
+            error_message = (
+                "model attempted to call a tool during replay despite tool_choice='none'; "
+                "the tools-free retry then returned an empty response"
+            )
     return ReplayOutcome(
         structured_attempted=structured_attempted, structured_success=False,
         fallback_triggered=structured_attempted, fallback_success=False,
         output_mode="error", status="error", parsed=None, text=text,
         finish_reason=finish_reason, usage=usage, error=error_message,
+        replay_input_mode=replay_input_mode, tool_history_detail=tool_history_detail,
     )
 
 
@@ -626,6 +779,8 @@ def replay_one(
         "status": status,
         "finish_reason": outcome.finish_reason if outcome is not None else None,
         "error": error or (outcome.error if outcome is not None else None) if status == "error" else None,
+        "replay_input_mode": outcome.replay_input_mode if outcome is not None else "exact",
+        "tool_history_detail": outcome.tool_history_detail if outcome is not None else None,
     }
     _write_json(model_dir / "metadata.json", metadata)
     return metadata
@@ -640,19 +795,36 @@ def run_benchmark(
     base_seed: int | None = None,
     provider: str | None = None,
     ticker: str | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     """Entry point used by the CLI. Read-only with respect to ``from_run``:
-    only ever opens files under it; every write goes under ``output_dir``."""
+    only ever opens files under it; every write goes under ``output_dir``.
+
+    ``on_progress``, when given, is called synchronously -- BEFORE and
+    AFTER each (stage, model) replay call, and once up front once the
+    source run/ticker is resolved -- so a caller (the CLI) can print
+    visible progress during a run that can otherwise take 30-60 minutes
+    with no output at all. Never receives a prompt or a response body,
+    only small structured fields (stage/model/counters/timing/tokens/
+    mode/error). This function itself never prints anything.
+    """
     _ensure_fresh_output_dir(output_dir)
     wall_started = time.monotonic()
     debug_dir, resolved_ticker = resolve_debug_dir(from_run, ticker)
     manifest = _load_run_manifest(debug_dir)  # fail fast if the trace is incomplete/missing
     source_run_provider = manifest.get("provider")
 
+    if on_progress is not None:
+        on_progress({"phase": "source_resolved", "source_run": str(from_run), "ticker": resolved_ticker})
+
     results: list[dict] = []
+    # Resolved up front (no LLM call yet) so progress reporting can show an
+    # exact N/total from its very first line, rather than a total that only
+    # becomes accurate after some stages turn out unsupported.
+    stage_calls: dict[str, TraceCall] = {}
     for stage_key in stage_keys:
         try:
-            source_call = find_source_call(debug_dir, stage_key)
+            stage_calls[stage_key] = find_source_call(debug_dir, stage_key)
         except ReplayError as exc:
             # A trace-structural problem (no separable final-synthesis
             # call at all) -- distinct from a specific MODEL failing to
@@ -660,14 +832,35 @@ def run_benchmark(
             # a per-(stage, model) "error" result instead (see
             # ``replay_one``), never this stage-wide status.
             results.append({"stage": stage_key, "status": "unsupported_for_replay", "reason": str(exc)})
-            continue
+            if on_progress is not None:
+                on_progress({"phase": "unsupported", "stage": stage_key, "reason": str(exc)})
+
+    total = len(stage_calls) * len(model_specs)
+    index = 0
+    for stage_key, source_call in stage_calls.items():
         for model_spec in model_specs:
+            index += 1
+            if on_progress is not None:
+                on_progress({
+                    "phase": "start", "index": index, "total": total, "stage": stage_key,
+                    "model": model_spec.model, "reasoning_effort": model_spec.reasoning_effort,
+                })
             result = replay_one(
                 source_call=source_call, model_spec=model_spec, stage_key=stage_key,
                 output_dir=output_dir, base_seed=base_seed, provider_override=provider,
                 ticker=resolved_ticker, source_run=from_run, source_run_provider=source_run_provider,
             )
             results.append(result)
+            if on_progress is not None:
+                on_progress({
+                    "phase": "finish" if result.get("status") == "success" else "error",
+                    "index": index, "total": total, "stage": stage_key,
+                    "model": model_spec.model, "reasoning_effort": model_spec.reasoning_effort,
+                    "elapsed_seconds": result.get("elapsed_seconds"),
+                    "total_tokens": result.get("total_tokens"),
+                    "output_mode": result.get("output_mode"),
+                    "error": result.get("error"),
+                })
 
     wall_elapsed = time.monotonic() - wall_started
     # Wall-clock time for the whole benchmark vs. the sum of each

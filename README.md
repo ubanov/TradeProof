@@ -15,7 +15,7 @@ applies in full here.
 
 TradeProof began as a fork of
 [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)
-(upstream **TradingAgents v0.5.1**) and still shares a meaningful part of its
+(upstream **TradingAgents v0.5.2**) and still shares a meaningful part of its
 original package structure and conventions. Since that starting point it has
 diverged significantly from upstream — in model routing, research
 verification, canonical research state, risk analysis design, observability,
@@ -27,7 +27,7 @@ It's published here as a personal project, in case it's useful to others
 working on similar ideas.
 
 - Upstream project: [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)
-- This fork's repository: [https://github.com/ubanov/TradingAgents](https://github.com/ubanov/TradingAgents)
+- This fork's repository: [https://github.com/ubanov/TradeProof](https://github.com/ubanov/TradeProof)
 
 The original TradingAgents project and its authors ([TauricResearch](https://github.com/TauricResearch))
 remain the source of the underlying framework and research this fork builds
@@ -35,6 +35,29 @@ on — see [Citation](#citation). This fork's own Python package, CLI command
 (`tradingagents`), and `TRADINGAGENTS_*` environment variable prefix are
 unchanged from upstream and are not renamed as part of presenting the
 project under the TradeProof name.
+
+## Project objective
+
+TradeProof is optimized first for **analysis quality, auditability, and decision
+usefulness**, not for minimum latency or inference cost. A thorough analysis may
+take minutes if the additional work produces a better-supported and more
+internally consistent recommendation.
+
+The intended workflow is to analyse multiple instruments, produce an auditable
+recommendation for each one, and preserve enough evidence and reasoning to
+explain **what was recommended and why**. Development therefore has two separate
+validation goals:
+
+1. **Reasoning quality** — are claims supported, calculations correct,
+   disagreements challenged, uncertainty explicit, and recommendations
+   internally consistent?
+2. **Decision usefulness** — over time, would acting on frozen historical
+   recommendations have produced useful risk-adjusted decisions?
+
+The first goal can be evaluated during development with traces, deterministic
+checks, adversarial review, validation, and controlled model replay. The second
+requires longitudinal out-of-sample evidence: a convincing report can still be
+wrong about future market behaviour.
 
 ## How TradeProof differs from upstream
 
@@ -63,10 +86,17 @@ most from upstream; the full, detailed list is in
   followed by one explicit cross-review round, instead of an open debate.
 - **Deterministic trade metrics** — risk/reward and ATR-based figures
   computed in code, not asserted by the model.
+- **Bounded decision-stage validation** — Research Manager, Trader, and
+  Portfolio Manager candidates can be checked for objective contract, numeric,
+  relational, and evidence-support errors, with at most one constrained repair
+  by the original producing model.
 - **LLM tracing / observability** — an opt-in, complete per-call trace
   (`--trace-llm`) for auditing exactly what was sent and received.
 - **Best-effort deterministic replay** — a `--seed` option that derives
   stable per-call seeds for providers that support it.
+- **Trace-based model benchmark replay** — selected final synthesis calls can
+  be replayed against different models using frozen evidence without rerunning
+  the trading pipeline or data-fetching tools.
 - **Configurable reasoning effort** and **generation/review model roles** —
   independent reasoning-effort and model configuration for the pipeline's
   generation (produce/synthesize/decide) and review (challenge/verify/audit)
@@ -391,8 +421,9 @@ needs the slower model) — see [Legacy naming](#legacy-naming) below.
 | Risk: Aggressive / Conservative / Neutral cross-review | Review |
 | Portfolio Manager | Generation |
 
-Trader and Portfolio Manager additionally run their structured output through
-Validator when validation is enabled — see [Validation](#validation).
+Research Manager, Trader, and Portfolio Manager additionally run their
+candidate output through Validator when validation is enabled — see
+[Validation](#validation).
 
 Canonical recovery (reconstructing structured state from a free-text
 fallback) always inherits the role of the call it is recovering — a Bull
@@ -409,22 +440,20 @@ strengths between structured generation/synthesis and adversarial
 review/auditing, which is what motivated separating the two roles instead of
 using one model knob for the whole pipeline.
 
-Example configuration (just an example — any compatible model works, and any
-two or three roles may share the same model):
+Example matching the **current experimentally preferred routing** (any
+compatible model may still be used, and roles may share the same model):
 
 ```bash
 # .env
-TRADINGAGENTS_GENERATION_LLM=deepseek-v4-pro:cloud
+TRADINGAGENTS_GENERATION_LLM=deepseek-v4.1-flash:cloud
 TRADINGAGENTS_GENERATION_REASONING_EFFORT=high
 
 TRADINGAGENTS_REVIEW_LLM=qwen3.8-flash-next:125b-a6b-q4_K_M
 TRADINGAGENTS_REVIEW_REASONING_EFFORT=medium
 
-# Validation is opt-in (see "Validation" below) -- validator_llm is only
-# needed when validation is enabled.
+# Validation is opt-in; validator_llm is required only when it is enabled.
 TRADINGAGENTS_VALIDATION_ENABLED=true
-TRADINGAGENTS_VALIDATOR_LLM=gpt-oss:20b
-TRADINGAGENTS_VALIDATOR_REASONING_EFFORT=low
+TRADINGAGENTS_VALIDATOR_LLM=gemma4:26b
 ```
 
 #### Legacy naming
@@ -657,26 +686,34 @@ same ticker/date/analysts/depth/language.
 ### Benchmark replay
 
 **This is a controlled model comparison using frozen traced inputs. It does
-not rerun tools or the trading pipeline.** It reuses the request already
-captured by a `--trace-llm` run — same messages, same structured-output
-contract, same evidence — and replays it against one or more different
-models, changing only model/reasoning_effort/seed.
+not rerun the trading pipeline or execute data-fetching tools.** It reuses the
+final synthesis context captured by `--trace-llm`, preserving the same frozen
+evidence, stage semantics, and structured-output contract while changing the
+model/reasoning configuration.
 
-**What it compares**: for a chosen stage, the exact serialized request of
-its FINAL synthesis call (the one that already has every tool result folded
-into the message history), sent unchanged to each model under test.
+Two replay input modes are recorded explicitly:
 
-**What it does NOT compare or do**: it never re-executes a tool (real
-data-fetching tools from the source call are never bound to the replay
-call), never regenerates a prompt from `AgentState`, never writes to the
-source run, and never runs any downstream stage. There is no scoring or
-"winner" — it produces comparable outputs and objective metrics
-(tokens/elapsed time/structured-success) only; judging them is a separate,
-later step.
+- `replay_input_mode="exact"` — the frozen message history is replayed directly.
+  For tool-using analyst stages, the original tool definitions may be exposed
+  with `tool_choice="none"` so the model sees the same protocol context, but no
+  tool is ever dispatched or executed by the benchmark.
+- `replay_input_mode="tool_history_normalized"` — used only when a provider or
+  model ignores the no-tool instruction and attempts another tool call. The
+  already-recorded tool-call/tool-result history is deterministically converted
+  into a non-executable synthesis context, preserving the textual tool results,
+  and the retry is sent with no executable tools available. The normalization
+  is recorded in metadata.
 
-**Supported stages** (first scope): Market, Sentiment, News, and
-Fundamentals Analyst, and Research Manager. Bull/Bear, Research Verifier,
-Trader, Risk, Portfolio Manager, and Validator are not yet supported.
+In both modes the principle is the same: **same frozen evidence, same final
+synthesis task, no tool re-execution, different model/reasoning configuration.**
+The benchmark therefore answers a narrow question: how do different models
+respond to the same already-collected evidence? It does not compare data
+retrieval quality, rerun downstream stages, modify canonical state, or declare a
+subjective winner automatically.
+
+**Supported stages** (current scope): Market, Sentiment, News, and Fundamentals
+Analyst, plus Research Manager. Bull/Bear, Research Verifier, Trader, Risk,
+Portfolio Manager, and Validator are not yet supported.
 
 ```bash
 tradingagents benchmark-models \
@@ -688,18 +725,21 @@ tradingagents benchmark-models \
   --output-dir ./retest/model-benchmark-v1
 ```
 
-`--from-run` is the run's own output folder (containing `<ticker>/debug/`
-from that run's `--trace-llm`). `--model` is repeatable; a model name may
-contain `:` freely (e.g. `qwen3.8-flash-next:125b-a6b-q4_K_M`) — only `@`
-introduces an optional reasoning effort, never `:`. `--seed` derives a
-stable seed per (stage, model) pair, the same `derive_call_seed` algorithm
-the pipeline itself uses; omit it to reuse each source call's own original
-seed instead. `--provider` applies to every model in the benchmark,
-defaulting to the source run's own configured provider.
+`--from-run` is the run's own output folder (containing `<ticker>/debug/` from
+that run's `--trace-llm`). `--model` is repeatable; a model name may contain `:`
+freely — only `@` introduces an optional reasoning effort. `--seed` derives a
+stable seed per (stage, model) pair using the same seed-derivation primitive as
+the pipeline; omit it to reuse the source call's original seed when available.
+`--provider` applies to every model in the benchmark, defaulting to the source
+run's configured provider.
+
+The output directory must be new or empty. Reusing a non-empty benchmark
+directory fails before any LLM call so `manifest.json`/`summary.json` can never
+describe only part of the artifacts present on disk.
 
 Output tree:
 
-```
+```text
 <output-dir>/
   manifest.json
   summary.json
@@ -710,9 +750,15 @@ Output tree:
       metadata.json
 ```
 
-`summary.json` lists, per (stage, model): source run/ticker/call identity,
-model, reasoning effort, seed, elapsed time, input/output/total tokens,
-structured success/fallback, parse success, and any error.
+`summary.json` records, per (stage, model), the source call identity, model,
+reasoning effort, seed, elapsed time, token counts, structured/fallback status,
+parse status, output mode, replay input mode, and any error. It also records
+aggregate benchmark timing.
+
+During execution the CLI prints timestamped progress for every comparison
+(`N/total`, stage, model, reasoning effort, START and FINISH/ERROR), followed by
+per-model and overall elapsed times. Long local-model calls therefore remain
+observable instead of leaving the terminal silent until the benchmark ends.
 
 ### Risk as independent assessment, not a second debate
 
@@ -854,98 +900,221 @@ audit, applied on top of upstream behavior:
   stderr/failure path unchanged.
 
 
-## Local LLM benchmark
+## Model evaluation and current routing
 
-Fixed scenario used for the comparison:
+TradeProof is being developed with **analysis quality as the primary model-selection
+criterion**. Latency and inference cost are measured because they matter
+operationally, but they are secondary: a slower model is preferred whenever it
+produces materially better research or review.
 
-- Ticker: NVDA
-- Analysis date: 2026-09-30
-- Analysts: market, social, news, fundamentals
-- Research depth: Medium
-- Language: Spanish
-- Same TradingAgents revision and prompts for all runs
+### Models evaluated
 
-> Results represent a single end-to-end run per model and should be interpreted
-> as practical observations on this hardware, not as general model benchmarks.
+The current routing is based on models that were actually exercised in
+TradeProof, not only on vendor descriptions or model size. A model that is not
+currently selected may still have been tested and rejected relative to the
+alternatives available at that point.
 
-| Model | Architecture | Runtime | LLM calls | Tool calls | Input tokens | Output tokens | Fallback warnings | Verification | Final decision | Observed suitability |
-|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
-| Qwen3.8-Flash-Next 125B A6B | MoE (~6B active) | 03:11:00 | 32 | 24 | 460,610 | 135,193 | 8 | WARN, no repair | Hold / REDUCE_RISK | Best observed quality; preferred for final validation / production runs |
-| Gemma 4 26B A4B | MoE (~4B active) | 00:34:45 | 42 | 16 | 299,298 | 102,234 | 14 | WARN, no repair | Hold / KEEP | Very good development model; fast and reasonably disciplined |
-| GPT-OSS 120B | large MoE | 01:30:44 | 56 | 14 | 407,550 | 64,234 | 19 | WARN, 1 repair | Buy / REDUCE_RISK | Good reasoning speed, but weak structured-output and provenance discipline |
-| GPT-OSS 20B | small/fast | 00:15:51 | 52 | 16 | 338,687 | 57,220 | 17 | WARN, no repair | Buy / REDUCE_RISK | Useful for smoke/stress tests; quality insufficient for final analysis |
-| Qwen3.8 27B | Dense | 14:13:15 | 36 | 24 | 542,922 | 139,287 | 9 | FAIL after repair | Overweight / KEEP | High analytical quality but impractical on this hardware |
+| Model | Observed behaviour in TradeProof | Current status |
+|---|---|---|
+| **Qwen 3.8 Flash Next 125B** | Strong local reasoning and the best observed adversarial-review behaviour. Medium reasoning has been more useful than xhigh; xhigh was much slower without a consistent quality gain. | **Retained for Review** |
+| **DeepSeek V4.1 Flash** | Strong first-pass analysis and synthesis. High reasoning has repeatedly produced high-quality Generation outputs; max added substantially more verbosity without a consistent improvement. | **Retained for Generation** |
+| **Gemma 4 26B** | Weaker than Qwen/DeepSeek for broad investment analysis, but effective at narrow objective checks and bounded validation. | **Retained for Validation** |
+| **DeepSeek V4 Pro** | Strong results at high reasoning. Max reasoning increased verbosity and did not consistently improve the final analysis. | Evaluated; not currently preferred over V4.1 Flash for Generation |
+| **GPT-OSS 120B** | Reasonable general reasoning speed, but weaker structured-output behaviour and provenance discipline in the full pipeline. | Evaluated and not selected for the current routing |
+| **GPT-OSS 20B** | Very fast and useful for smoke/guardrail testing, but insufficient for maximum-quality investment analysis. | Retained only for fast development/smoke tests |
+| **Qwen 3.8 27B dense** | High analytical quality in the observed run, but extremely slow on the tested hardware. | Not practical on the current local hardware/configuration |
 
-### Practical model selection
+These are **project-specific observations**, not general model rankings. They
+depend on TradeProof's prompts, architecture, provider/backend, quantization and
+hardware. "Not selected" means the model was actually exercised and did not
+offer enough advantage for the role being considered; it does not mean the
+model is generally poor.
 
-- **Final analysis / validation:** Qwen3.8-Flash-Next 125B A6B
-- **Full development runs:** Gemma 4 26B A4B
-- **Fast smoke / guardrail tests:** GPT-OSS 20B
-- **Not currently preferred:** GPT-OSS 120B
-- **Discarded for this hardware:** Qwen3.8 27B dense
+#### Earlier full-pipeline screening results
 
-### Pipeline cost and token volume
+Before the current role-specific Generation / Review / Validation routing was
+settled, a representative NVDA Medium-depth scenario was used to compare several
+local models end-to-end. Keeping this compact table is useful because it records
+which models were genuinely tested before being dropped or reassigned to a
+narrower role. It is **not** the current routing recommendation.
 
-> **Project version: 0.8.0** — the figures below were measured against this
-> exact revision. If this section is read from a later version, treat it as
-> historical: it documents the cost profile of the architecture as it stood
-> at 0.8.0, not of whatever version is current now.
+| Model | Runtime | LLM calls | Tool calls | Input tokens | Output tokens | Fallback warnings | Verification | Final decision | What the run taught us |
+|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| Qwen 3.8 Flash Next 125B A6B | 03:11:00 | 32 | 24 | 460,610 | 135,193 | 8 | WARN, no repair | Hold / REDUCE_RISK | Strongest local quality in that screening round; later retained primarily for Review rather than all stages |
+| Gemma 4 26B A4B | 00:34:45 | 42 | 16 | 299,298 | 102,234 | 14 | WARN, no repair | Hold / KEEP | Useful development model; later found better suited to bounded Validation than broad Generation |
+| GPT-OSS 120B | 01:30:44 | 56 | 14 | 407,550 | 64,234 | 19 | WARN, 1 repair | Buy / REDUCE_RISK | Good reasoning speed, but structured-output/provenance discipline was weaker than the alternatives |
+| GPT-OSS 20B | 00:15:51 | 52 | 16 | 338,687 | 57,220 | 17 | WARN, no repair | Buy / REDUCE_RISK | Fast enough for smoke tests; quality was not sufficient for final investment analysis |
+| Qwen 3.8 27B dense | 14:13:15 | 36 | 24 | 542,922 | 139,287 | 9 | FAIL after repair | Overweight / KEEP | Good analysis, but impractical runtime on the tested hardware |
 
-A `Medium`-depth analysis with every analyst enabled is **not a single LLM
-call** — it is dozens of coordinated calls across analysts, an independent
-Bull/Bear debate, verification, risk assessment, and portfolio decision-making
-(see "Why this uses so many tokens" below). Even a modest batch of tickers can
-generate millions of tokens. Keep in mind that:
+The scenario used NVDA, analysis date `2026-09-30`, all four analysts, Medium
+research depth, Spanish output, and the same TradeProof revision/prompts for the
+models in that comparison. The table should therefore be read as evidence from
+that specific screening exercise, not as a universal benchmark.
 
-- execution time depends heavily on hardware;
-- it also depends on inference backend, quantization, and the CPU/GPU split;
-- **token count is a better measure of the actual work the pipeline does**
-  than wall-clock time, since it is far less hardware-dependent;
-- the numbers below are local observations on one machine, not general
-  benchmarks of the models involved.
+### What the experiments showed
 
-#### Measured Gemma 4 26B stress test (12-ticker batch)
+Full-pipeline runs across different seeds/reasoning levels and controlled replay
+benchmarks have repeatedly shown that **more reasoning is not automatically
+better** and that different pipeline stages benefit from different model
+characteristics. Real runs have surfaced and repaired issues including:
 
-`gemma4:26b` is used here for **development / stress testing**, not as a
-recommended production or maximum-quality model (see "Current model roles"
-below).
+- incorrect reward/risk calculations and entry/stop arithmetic;
+- reintroduction of trade levels withdrawn earlier in the debate;
+- contradictions between a manager recommendation and Trader action;
+- semantic mistakes such as confusing a take-profit level with a stop;
+- unsupported numbers or operational thresholds;
+- failure to preserve `UNKNOWN` when the evidence does not justify a stronger
+  conclusion.
 
-Configuration:
+The bounded Validator has also demonstrated the intended real repair path:
 
-- Analysis date: 2026-09-30
-- Research depth: Medium
-- Language: Spanish
-- Analysts: Market, Social/Sentiment, News, Fundamentals
-- Tickers: NVDA, AMD, AAPL, MSFT, AMZN, META, TSLA, JPM, XOM, LLY, SPY, BTC-USD
+```text
+candidate
+   |
+   v
+objective validation
+   |
+   +-- PASS/WARN --> continue
+   |
+   +-- FAIL --> one constrained repair by the original model
+                         |
+                         v
+                       recheck
+```
 
-Results:
+Only one repair attempt is allowed. Validator never replaces the investment
+reasoning model or makes the BUY/HOLD/SELL decision itself.
 
-| Metric | Total | Average per ticker |
-|---|---:|---:|
-| Tickers analyzed | 12 | — |
-| Successful analyses | 12 | — |
-| Failed analyses | 0 | — |
-| Total runtime | 07:09:36 | ~00:35:48 |
-| LLM calls | 558 | ~46.5 |
-| Tool calls | 192 | 16 |
-| Input tokens | 3,623,692 | ~301,974 |
-| Output tokens | 1,327,250 | ~110,604 |
-| Total LLM tokens | 4,950,942 | ~412,579 |
+### Controlled replay results
 
-Additional detail: Bull initial calls 12, Bear initial calls 12, Bull review
-calls 24, Bear review calls 24, Research Verifier passes 13, repair rounds 1.
+Controlled replay comparisons have so far been run on **LLY** and **MSFT** for
+Market, Sentiment, News, Fundamentals, and Research Manager. These are useful
+engineering experiments, not a statistically complete model benchmark: two
+tickers cannot establish that one model is universally superior, and these
+tests evaluate reasoning behaviour rather than investment profitability.
 
-> **Twelve Medium-depth analyses generated almost 5 million LLM tokens.**
+The repeated observations have nevertheless been useful:
 
-> [!WARNING]
-> If the model is consumed through a paid API instead of a local backend,
-> even a batch that looks small (12 tickers here) can generate a significant
-> bill. Estimate the expected token volume and the provider/model's price per
-> token **before** running a large batch, not after.
+- **Market** — DeepSeek V4.1 Flash high and Qwen 125B medium both produced
+  detailed, conditional technical analysis. DeepSeek was particularly strong as
+  a first-pass generator. Gemma was shallower and made objective indicator
+  interpretation errors in controlled replay.
+- **Fundamentals** — Qwen and DeepSeek were both strong. Qwen tended to be more
+  selective; DeepSeek extracted and derived more from the supplied financial
+  data, which can be useful but also creates more surface area for weakly
+  supported derived metrics. Gemma lost substantially more detail.
+- **Sentiment** — Qwen and DeepSeek generally preserved the important
+  distinction between `NO_DATA` and evidence of neutral sentiment. The larger
+  limitation is currently data acquisition, not model reasoning.
+- **News** — Qwen and DeepSeek generally separated macro information from
+  ticker-specific news and avoided inventing company catalysts when evidence
+  was unavailable. Company-specific historical news coverage remains weaker
+  than macro coverage in some runs.
+- **Research Manager** — Qwen and DeepSeek both combined conflicting Bull/Bear
+  arguments, deterministic trade metrics, verification results, and uncertainty
+  coherently. Qwen's strongest observed contribution has been critical,
+  adversarial reasoning; DeepSeek's has been comprehensive first-pass synthesis.
 
-#### Hardware
+Concrete controlled-replay errors also helped distinguish roles. Examples from
+the observed runs include Gemma describing a positive 10Y–2Y spread as an
+inverted curve, stating that a MACD value of 7.38 was above a 7.45 signal line,
+and sometimes wording source-unavailability as if it proved that no sentiment
+posts existed. Those weaknesses as a broad analyst do not prevent Gemma from
+being effective as a narrowly-scoped Validator.
 
-Benchmarks in this section were run on:
+### Current preferred routing
+
+Based on the experiments so far, the current preferred experimental routing is:
+
+```text
+GENERATION
+    DeepSeek V4.1 Flash / high
+          |
+          v
+first-pass analysts, initial theses,
+Research Manager, Trader, Portfolio Manager
+
+REVIEW
+    Qwen 125B / medium
+          |
+          v
+adversarial debate, Research Verifier,
+research repair and Risk cross-review
+
+VALIDATION
+    Gemma 4 26B
+          |
+          v
+bounded objective checks and one-shot repair
+```
+
+This routing is **not chosen because it is the fastest**. Qwen is kept where its
+slower, more critical reasoning has shown the most value; DeepSeek is used for
+generation because controlled comparisons have not shown a quality advantage
+large enough to justify running Qwen for every first-pass stage; Gemma is kept
+in the intentionally narrow Validator role where objective checking matters more
+than broad investment synthesis.
+
+One controlled MSFT replay illustrates the operational difference:
+
+| Model | Total measured time |
+|---|---:|
+| Qwen 125B medium | 53m 07s |
+| Gemma 4 26B | 6m 26s |
+| DeepSeek V4.1 Flash high | 2m 34s |
+
+These timings are hardware/provider-specific and are not the selection target.
+If a slower configuration later proves materially better for decision quality,
+TradeProof should prefer the slower configuration.
+
+### Cost observations
+
+Observed cloud spend has so far been small relative to the volume of analysis:
+
+- eight complete hybrid runs using DeepSeek for generation and local models for
+  review/validation consumed approximately **$0.78** of cloud credit;
+- one controlled replay benchmark using DeepSeek alongside the two local models
+  consumed approximately **$0.03** of cloud credit.
+
+These are empirical development observations, not guaranteed provider pricing.
+Cost is tracked for operational awareness rather than used as the primary
+model-selection criterion.
+
+### What these benchmarks do not prove
+
+These experiments evaluate the **quality and behaviour of the analysis
+pipeline**. They do **not** demonstrate that TradeProof recommendations are
+profitable. A coherent, internally consistent, well-supported thesis can still
+be wrong about future market behaviour.
+
+The next major validation step is longitudinal:
+
+1. analyse multiple symbols using a frozen TradeProof version;
+2. persist the recommendation, thesis, levels, evidence, and version identity;
+3. never rewrite historical recommendations after the fact;
+4. observe subsequent market behaviour;
+5. evaluate whether the recommendations, risk controls, and relative rankings
+   would have produced useful decisions.
+
+> **First make the reasoning auditable and reliable; then measure whether the
+> advice itself has predictive or economic value.**
+
+## Operational scale and local hardware
+
+A Medium-depth analysis with every analyst enabled is not a single LLM call. It
+can include analyst reports, independent Bull/Bear theses, multiple cross-review
+rounds, Research Verifier, optional research repair/re-verification, Research
+Manager, Trader, three independent Risk assessments, three Risk cross-reviews,
+Portfolio Manager, Validator calls, and occasional structured-output fallback or
+canonical-recovery calls.
+
+That architecture deliberately spends context and tokens to buy auditability,
+adversarial review, provenance control, and objective error detection. Token
+volume is therefore often a better measure of pipeline work than wall-clock
+time, which depends heavily on hardware, quantization, backend, and CPU/GPU
+split.
+
+Local development measurements in this README were produced on:
 
 - CPU: AMD Ryzen 5 7600X
 - System RAM: 128 GB @ 3800 MT/s
@@ -954,80 +1123,9 @@ Benchmarks in this section were run on:
 - Inference backend: Ollama
 - Context length: 131072
 
-Runtime figures depend strongly on this hardware, the model's quantization,
-the inference backend, and how a model's layers split between GPU VRAM and
-system RAM/CPU. A different machine, backend, or quantization can change
-wall-clock time substantially even for the same model and workload.
-
-During the Gemma 4 26B batch above, Ollama reported **28% CPU / 72% GPU** at
-the end of the run. This is not a CPU/GPU utilization percentage — it reflects
-the CPU/GPU split Ollama used to host that specific model on this specific
-machine/configuration. Other models can have a very different split and
-performance profile.
-
-#### Qwen 125B comparison
-
-`qwen3.8-flash-next:125b-a6b-q4_K_M` is the local model currently preferred
-for quality validation. The single-run figures below are the same NVDA run
-already listed in the model-comparison table above — repeated here as the
-basis for a 12-ticker extrapolation:
-
-- Ticker: NVDA only (**a single run, not a 12-ticker batch**)
-- Analysis date: 2026-09-30
-- Research depth: Medium / Language: Spanish
-- Analysts: Market, Social/Sentiment, News, Fundamentals
-- Runtime: 03:11:00
-- LLM calls: 32 / Tool calls: 24
-- Input tokens: 460,610 / Output tokens: 135,193 / Total tokens: 595,803
-
-Linear ×12 extrapolation — **illustrative extrapolation, not a measured
-12-ticker batch**:
-
-| Metric | Illustrative 12-ticker extrapolation |
-|---|---:|
-| Runtime | ~38 h 12 min |
-| LLM calls | ~384 |
-| Tool calls | ~288 |
-| Input tokens | ~5.53 M |
-| Output tokens | ~1.62 M |
-| Total tokens | ~7.15 M |
-
-A real 12-ticker batch would not necessarily match this exactly:
-
-- different symbols can trigger a different number of tool calls;
-- the number of structured-output fallbacks can vary;
-- some tickers may need additional repair rounds;
-- token counts can vary with how much evidence each ticker's reports contain;
-- runtime depends heavily on hardware and the CPU/GPU split.
-
-This comparison shows order of magnitude, not a prediction of how long a real
-batch will take.
-
-#### Why this uses so many tokens
-
-A `Medium` run can include: (1) analyst reports, (2) Bull and Bear initial
-theses, (3) two Bull/Bear cross-review rounds, (4) research verification,
-(5) optional repair and re-verification, (6) Research Manager, (7) Trader,
-(8) three independent Risk assessments, (9) three Risk cross-reviews,
-(10) Portfolio Manager, and (11) additional fallback / canonical-recovery
-calls when structured output fails.
-
-This buys auditability, adversarial review, thesis contrast, error detection,
-and provenance/canonical-state control — at a real cost in calls, context, and
-tokens.
-
-#### Current model roles
-
-- **Final / high-quality local validation:** `qwen3.8-flash-next:125b-a6b-q4_K_M`
-- **Development / stress testing:** `gemma4:26b`
-- **Very fast smoke testing:** `gpt-oss:20b`
-
-`gemma4:26b` is used during development because it is considerably faster and
-reliably produces enough structured-output fallbacks to exercise the fallback
-and canonical-recovery paths — it is **not** the preferred model for
-maximum-quality analysis. These role assignments are local observations for
-this project and hardware, not general claims about the absolute quality of
-these models.
+The local Qwen and Gemma timings above should therefore be read as measurements
+of this environment, not general model benchmarks. Cloud-provider timings are
+similarly provider- and load-dependent.
 
 ## Planned experiments
 
@@ -1045,51 +1143,48 @@ considered part of the implemented architecture until they are completed.
   portfolio percentage — conviction only selects the bounded risk unit; sizing
   math is separate and deterministic.
 
-### Historical recommendation tracking
+### Rich immutable recommendation tracking
 
-- Persist structured recommendations from:
-  - Bull;
-  - Bear;
-  - Research Manager;
-  - final Portfolio Manager.
+TradingAgents already provides a decision log and a backtesting facility (see
+[Persistence and Recovery](#persistence-and-recovery) and
+[Evaluating decisions over time](#evaluating-decisions-over-time)). The planned
+TradeProof extension goes further: preserve the **complete structured decision
+state** needed to reconstruct what the system recommended and why.
 
-- Record their initial thesis, final thesis, conviction, trade levels, and key
-  reasoning in a structured history.
+Planned fields include:
 
-- Update completed recommendations later using realised market prices.
+- Bull and Bear initial/final theses and conviction trails;
+- Research Manager recommendation;
+- Trader plan and final Portfolio Manager rating/disposition;
+- entry range/reference, stop, target, horizon, deterministic trade metrics;
+- key evidence/provenance and known data gaps;
+- TradeProof version/commit, prompt hashes, model routing, and a report hash.
 
-- Possible outcomes include:
-  - entry not triggered;
-  - take profit reached;
-  - stop loss reached;
-  - expired at the defined horizon.
-
-- Additional statistics may include maximum favourable excursion, maximum
-  adverse excursion, realised return, and time to outcome.
+The historical record should be immutable after creation. Subsequent market data
+may append outcomes, but must never rewrite the original recommendation. Useful
+measurements may include entry triggered/not triggered, target/stop reached,
+expiry at horizon, realised return, alpha against an appropriate benchmark,
+maximum favourable/adverse excursion, realised R, and time to outcome.
 
 ### Historical feedback
 
-- Build deterministic historical-performance summaries for future analyses.
+Once enough immutable outcomes exist, build deterministic historical-performance
+summaries for future analyses. Any such feedback must avoid look-ahead leakage
+and should be derived primarily from structured market variables and recorded
+outcomes rather than free-form retrospective narratives.
 
-- The initial Bull and Bear researchers may receive relevant historical
-  performance context, while normal review agents should not receive this
-  additional information.
+Potential summaries include:
 
-- Historical summaries may include:
-  - overall results;
-  - results by conviction range;
-  - results for similar technical conditions;
-  - recurring failure patterns;
-  - recurring strengths.
+- overall results and benchmark-relative results;
+- results by rating/disposition and conviction range;
+- results for similar technical/fundamental conditions;
+- recurring failure patterns and recurring strengths.
 
-- The objective is to allow agents to recognise patterns such as:
-  "this type of setup has historically been weak for my thesis"
-  without treating past results as a guarantee of future performance.
-
-- Historical context should be derived as far as possible from objective,
-  structured market variables rather than free-form LLM narratives, to reduce
-  feedback loops and confirmation bias.
-
+The initial Bull/Bear researchers may eventually receive carefully bounded
+historical-performance context. Normal review agents should not receive extra
+information that was unavailable to the original thesis unless the experiment
+explicitly intends to test that change. Past results must remain context, never
+a guarantee of future performance.
 ---
 
 
@@ -1208,8 +1303,8 @@ Our framework decomposes complex trading tasks into specialized roles.
 
 Clone this fork (TradeProof):
 ```bash
-git clone https://github.com/ubanov/TradingAgents.git
-cd TradingAgents
+git clone https://github.com/ubanov/TradeProof.git
+cd TradeProof
 ```
 
 Create a virtual environment in any of your favorite environment managers:
