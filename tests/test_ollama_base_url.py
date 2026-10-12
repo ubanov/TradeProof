@@ -23,16 +23,20 @@ def _resync_reloaded_modules():
     """Restore module state after this file's importlib.reload() calls.
 
     Several tests below reload ``cli.prompts`` to re-evaluate OLLAMA_BASE_URL.
-    That leaves the modules importing from it (cli.selections, then cli.run and
-    cli.main) bound to the pre-reload functions, which breaks identity checks in
-    unrelated tests that run afterward. Re-sync them in import order on teardown.
+    That leaves the modules importing from it (cli.selections, then cli.run,
+    cli.headless and cli.main) bound to the pre-reload functions/classes,
+    which breaks identity checks in unrelated tests that run afterward --
+    e.g. ``except PartialExecutionError`` in cli.headless silently failing to
+    catch an instance raised by a reloaded cli.run, since the two would be
+    different class objects. Re-sync them in import order on teardown.
     """
     yield
+    import cli.headless
     import cli.main
     import cli.prompts
     import cli.run
     import cli.selections
-    for module in (cli.prompts, cli.selections, cli.run, cli.main):
+    for module in (cli.prompts, cli.selections, cli.run, cli.headless, cli.main):
         importlib.reload(module)
 
 
