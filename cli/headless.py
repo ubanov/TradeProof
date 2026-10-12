@@ -225,6 +225,34 @@ def _research_execution(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _structured_section(state: dict[str, Any]) -> dict[str, Any]:
+    """The original Pydantic objects (JSON-safe via model_dump), not the
+    regex-recovered legacy fields above -- structured object is the source
+    of truth, rendered markdown is presentation only (see fork README:
+    "Preserve structured objects through the pipeline"). Every value here
+    is None/absent exactly when that stage never produced a surviving
+    structured parse (never fabricated from partial/free text), so a
+    partial/failed run degrades to nulls rather than breaking.
+    """
+    debate = state.get("investment_debate_state", {}) or {}
+    risk = state.get("risk_debate_state", {}) or {}
+    return {
+        "research_plan": state.get("research_plan_structured"),
+        "trader_proposal": state.get("trader_proposal_structured"),
+        "portfolio_decision": state.get("portfolio_decision_structured"),
+        "bull_trade_metrics": debate.get("bull_trade_metrics"),
+        "bear_trade_metrics": debate.get("bear_trade_metrics"),
+        "bull_thesis": debate.get("bull_thesis"),
+        "bear_thesis": debate.get("bear_thesis"),
+        "bull_conviction_history": debate.get("bull_conviction_history"),
+        "bear_conviction_history": debate.get("bear_conviction_history"),
+        "manager_integrity_status": debate.get("manager_integrity_status") or None,
+        "manager_integrity_findings": debate.get("manager_integrity_findings"),
+        "risk_integrity_status": risk.get("risk_integrity_status") or None,
+        "risk_integrity_findings": risk.get("risk_integrity_findings"),
+    }
+
+
 def _progress_reporter(
     progress: Callable[[str], None],
     prefix: str,
@@ -403,6 +431,7 @@ def result_document(execution, report_root: Path) -> dict[str, Any]:
         "validation": summarize_validation_log(state.get("validation_log", [])),
         "base_seed": execution.base_seed,
         "source_coverage": state.get("source_coverage"),
+        "structured": _structured_section(state),
     }
 
 
@@ -593,6 +622,7 @@ def _error_result(
         "failure_stage": failure_stage,
         "partial": _partial_state_summary(final_state) if final_state else None,
         "source_coverage": (final_state or {}).get("source_coverage"),
+        "structured": _structured_section(final_state or {}),
     }
 
 

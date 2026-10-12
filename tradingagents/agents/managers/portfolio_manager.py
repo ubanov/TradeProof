@@ -161,9 +161,21 @@ def create_portfolio_manager(generation_llm, validator_llm=None):
             "latest_speaker": "Judge",
         }
 
+        # The structured object consistent with final_trade_decision's text --
+        # outcome.final_parsed is the REPAIRED parse when validation triggered
+        # a repair, never stale. None when no structured parse survived --
+        # never fabricated from partial/free text. The existing regex-based
+        # `portfolio_disposition` above is left untouched (legacy field, see
+        # fork README: "Preserve structured objects through the pipeline");
+        # this is purely additive.
+        portfolio_decision_structured = (
+            outcome.final_parsed.model_dump(mode="json") if outcome.final_parsed is not None else None
+        )
+
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
+            "portfolio_decision_structured": portfolio_decision_structured,
             "validation_log": validation_log,
         }
 

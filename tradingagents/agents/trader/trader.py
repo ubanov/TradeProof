@@ -162,9 +162,19 @@ def create_trader(generation_llm, validator_llm=None):
 
         validation_log = [*state.get("validation_log", []), outcome.as_log_entry("Trader")]
 
+        # The structured object consistent with final_plan -- outcome.final_parsed
+        # is the REPAIRED parse when validation triggered a repair, never the
+        # stale pre-repair `parsed`, so this is never out of sync with the text
+        # actually used downstream. None when no structured parse survived (a
+        # free-text fallback with no parse) -- never fabricated from partial text.
+        trader_proposal_structured = (
+            outcome.final_parsed.model_dump(mode="json") if outcome.final_parsed is not None else None
+        )
+
         return {
             "messages": [AIMessage(content=final_plan)],
             "trader_investment_plan": final_plan,
+            "trader_proposal_structured": trader_proposal_structured,
             "sender": name,
             "validation_log": validation_log,
         }

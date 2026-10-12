@@ -269,9 +269,18 @@ def create_research_manager(generation_llm, validator_llm=None):
             "manager_integrity_findings": integrity_result.as_dict()["findings"],
         }
 
+        # The structured object consistent with investment_plan's text --
+        # outcome.final_parsed is the REPAIRED parse when validation triggered
+        # a repair, never stale. None when no structured parse survived --
+        # never fabricated from partial/free text.
+        research_plan_structured = (
+            outcome.final_parsed.model_dump(mode="json") if outcome.final_parsed is not None else None
+        )
+
         return {
             "investment_debate_state": new_investment_debate_state,
             "investment_plan": investment_plan,
+            "research_plan_structured": research_plan_structured,
             "validation_log": validation_log,
         }
 
