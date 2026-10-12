@@ -252,15 +252,19 @@ def _coverage_window(method: str, args: tuple) -> tuple[str | None, str | None]:
 
 def record_news_router_outcome(
     method: str, vendor: str, args: tuple, *, text: str | None = None, exc: Exception | None = None,
-) -> None:
+) -> SourceStatus | None:
     """Classify and record one ``route_to_vendor`` vendor attempt for one of
     the four News-analyst methods; a no-op for every other method (so this
     is safe to call unconditionally from ``route_to_vendor``'s loop without
     it needing to special-case anything about OHLCV/fundamentals/etc.) and a
     no-op with no active collector (see ``record_source_coverage``).
+
+    Returns the classified ``SourceStatus`` (``None`` for an unrelated
+    method) so the caller can decide whether to advance a multi-vendor chain
+    on it (see ``route_to_vendor``) without classifying the same text twice.
     """
     if method not in _NEWS_COVERAGE_BUCKETS:
-        return
+        return None
     top_level = _category_prefix.get()
     bucket = "news" if top_level == "sentiment" else _NEWS_COVERAGE_BUCKETS[method]
     requested_start, requested_end = _coverage_window(method, args)
@@ -277,6 +281,7 @@ def record_news_router_outcome(
             requested_start=requested_start, requested_end=requested_end,
         )
     record_source_coverage(bucket, vendor, entry, top_level=top_level)
+    return status
 
 
 def classify_router_exception(exc: Exception) -> SourceStatus:
@@ -286,20 +291,19 @@ def classify_router_exception(exc: Exception) -> SourceStatus:
     call itself raised (see ``yahoo/news.py``'s blanket ``except Exception``),
     never "no items in window" -- that path returns a string, not this
     exception -- so it is a technical failure here, not a legitimate empty."""
-    from tradingagents.dataflows.errors import (
-        NoMarketDataError,
-        VendorNotConfiguredError,
-        VendorRateLimitError,
-    )
+    from tradingagents.dataflows.errors import VendorNotConfiguredError, VendorRateLimitError
 
     if isinstance(exc, VendorRateLimitError):
         return SourceStatus.RATE_LIMITED
     if isinstance(exc, VendorNotConfiguredError):
         return SourceStatus.AUTH_MISSING
+    # Checked by TEXT, not just isinstance(exc, TimeoutError): requests'
+    # own Timeout/ConnectTimeout/ReadTimeout subclass OSError, not the
+    # builtin TimeoutError, and NoMarketDataError (yahoo/news.py's blanket
+    # wrapper) carries the original exception's text in its own message --
+    # either shape must still classify as TIMEOUT, not a generic error.
     detail = str(exc).lower()
-    if isinstance(exc, (TimeoutError, NoMarketDataError)) and "timeout" in detail:
-        return SourceStatus.TIMEOUT
-    if isinstance(exc, TimeoutError):
+    if "timeout" in detail or "timed out" in detail:
         return SourceStatus.TIMEOUT
     return SourceStatus.PROVIDER_ERROR
 

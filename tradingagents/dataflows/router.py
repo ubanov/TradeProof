@@ -6,7 +6,7 @@ from tradingagents.dataflows.errors import (
     VendorNotConfiguredError,
     VendorRateLimitError,
 )
-from tradingagents.dataflows.source_coverage import record_news_router_outcome
+from tradingagents.dataflows.source_coverage import SourceStatus, record_news_router_outcome
 from tradingagents.dataflows.vendors.alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
     get_cashflow as get_alpha_vantage_cashflow,
@@ -212,6 +212,16 @@ def route_to_vendor(method: str, *args, **kwargs):
     last_no_data: NoMarketDataError | None = None
     last_unavailable: VendorRateLimitError | None = None
     first_error: Exception | None = None
+    # A vendor that structurally cannot serve a historical date (e.g.
+    # yfinance's news feed, which only ever has "latest" items) is not a
+    # vendor FAILURE -- it returns normally, with a clear sentinel string --
+    # so it would never reach the except clauses below and the chain would
+    # never advance. For the four News-analyst methods only (everything else
+    # is unaffected, same as every other piece of source-coverage tracking),
+    # UNSUPPORTED_HISTORICAL is therefore treated like the other "try the
+    # next vendor" outcomes: recorded, kept as the fallback answer, and
+    # tried again with the next configured vendor if there is one.
+    last_unsupported_historical: str | None = None
     for vendor in vendor_chain:
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
@@ -245,8 +255,21 @@ def route_to_vendor(method: str, *args, **kwargs):
             record_news_router_outcome(method, vendor, args, exc=e)
             continue
         else:
-            record_news_router_outcome(method, vendor, args, text=result)
+            status = record_news_router_outcome(method, vendor, args, text=result)
+            if status == SourceStatus.UNSUPPORTED_HISTORICAL:
+                logger.info(
+                    "Vendor %r cannot serve a historical date for %s; trying next vendor.", vendor, method,
+                )
+                last_unsupported_historical = result
+                continue
             return result
+
+    # Every vendor in the chain structurally could not serve this historical
+    # date (never a vendor failure) -- the chain is exhausted, so this is
+    # the real, final answer; return the last vendor's own sentinel rather
+    # than inventing a combined one.
+    if last_unsupported_historical is not None:
+        return last_unsupported_historical
 
     # If any vendor reported "no data", the symbol is genuinely unavailable.
     # Return one explicit, instructive sentinel rather than a vendor-specific
