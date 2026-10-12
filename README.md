@@ -59,6 +59,35 @@ checks, adversarial review, validation, and controlled model replay. The second
 requires longitudinal out-of-sample evidence: a convincing report can still be
 wrong about future market behaviour.
 
+> ### Current validation stage
+>
+> TradeProof is currently in a validation phase focused on:
+>
+> - reasoning coherence;
+> - faithfulness to the supplied evidence;
+> - numerical correctness;
+> - internal consistency;
+> - auditability and reproducibility.
+>
+> **It has NOT yet validated predictive ability**, and it has **not** been
+> shown that its recommendations are profitable or that they improve
+> investment decisions.
+>
+> **Coherent analysis != predictive ability.** A recommendation can be
+> well-reasoned, well-supported, and internally consistent, and still be
+> wrong about what the market does next — coherence is a property of the
+> reasoning, not evidence that the reasoning is predictive.
+>
+> The next phase is to freeze historical recommendations and evaluate them
+> longitudinally / out-of-sample against what actually happens in the market
+> afterward.
+>
+> **Current question:** does TradeProof produce coherent and auditable
+> analysis?
+>
+> **Still unanswered:** are TradeProof's recommendations actually useful for
+> predicting markets or improving investment outcomes?
+
 ## How TradeProof differs from upstream
 
 A short summary of the architectural areas where this fork has diverged
