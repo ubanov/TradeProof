@@ -432,6 +432,7 @@ def result_document(execution, report_root: Path) -> dict[str, Any]:
         "base_seed": execution.base_seed,
         "source_coverage": state.get("source_coverage"),
         "structured": _structured_section(state),
+        "run_provenance": state.get("run_provenance"),
     }
 
 
@@ -623,6 +624,7 @@ def _error_result(
         "partial": _partial_state_summary(final_state) if final_state else None,
         "source_coverage": (final_state or {}).get("source_coverage"),
         "structured": _structured_section(final_state or {}),
+        "run_provenance": (final_state or {}).get("run_provenance"),
     }
 
 

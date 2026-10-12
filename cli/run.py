@@ -47,12 +47,15 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.llm_trace import (
     LLMTraceCallbackHandler,
     SeedContext,
+    _git_info,
+    _package_version,
     set_active_seed_context,
     set_active_tracer,
     snapshot_prompts,
     write_run_manifest,
 )
 from tradingagents.reporting import write_report_tree
+from tradingagents.run_provenance import build_run_provenance
 from tradingagents.run_seed import SEED_CAPABLE_PROVIDERS
 
 logger = logging.getLogger(__name__)
@@ -310,6 +313,8 @@ def _start_llm_trace(
     selected_analysts: list[str], config: dict,
     configured_seed: int | None = None, base_seed: int | None = None,
     seed_provider_supported: bool = False,
+    git_info: dict | None = None, package_version: str | None = None,
+    prompt_hashes: dict[str, str] | None = None,
 ) -> LLMTraceCallbackHandler | None:
     """Set up opt-in LLM trace mode for this run, or explicitly clear any
     tracer left active by a previous ticker in the same batch process.
@@ -317,6 +322,12 @@ def _start_llm_trace(
     Always called (even when trace_llm is False): contextvars persist across
     sequential calls in the same thread, so a batch run that traces ticker 1
     but not ticker 2 must not leak ticker 1's tracer into ticker 2.
+
+    ``git_info``/``package_version``/``prompt_hashes`` are the SAME values
+    already computed once for this run's unconditional provenance snapshot
+    (see ``build_run_provenance`` in ``execute_analysis`` below) -- passed
+    through so git is never invoked twice per run and the manifest can
+    never diverge from provenance on the fields they share.
     """
     if not trace_llm or output_dir is None:
         set_active_tracer(None)
@@ -330,7 +341,12 @@ def _start_llm_trace(
     def _on_warn(path: Path, exc: Exception) -> None:
         print(f"[WARN] LLM trace: failed to write {path} ({exc}); continuing.", flush=True)
 
-    prompt_hashes = snapshot_prompts(debug_dir, _on_warn)
+    # snapshot_prompts still does its own read pass (it writes each file to
+    # debug_dir/prompts/, which needs the content regardless), but its
+    # hashing is hash_prompt_files() underneath -- the exact function
+    # provenance's own prompt_hashes already came from, never a second
+    # hashing implementation.
+    written_prompt_hashes = snapshot_prompts(debug_dir, _on_warn)
     write_run_manifest(
         debug_dir,
         ticker=ticker,
@@ -342,11 +358,13 @@ def _start_llm_trace(
         effective_deep_model=config.get("deep_think_llm", ""),
         effective_quick_model=config.get("quick_think_llm", ""),
         config=config,
-        prompt_hashes=prompt_hashes,
+        prompt_hashes=prompt_hashes if prompt_hashes is not None else written_prompt_hashes,
         on_warn=_on_warn,
         configured_seed=configured_seed,
         base_seed=base_seed,
         seed_provider_supported=seed_provider_supported,
+        git_info=git_info,
+        package_version=package_version,
     )
     return tracer
 
@@ -399,11 +417,33 @@ def execute_analysis(
     # next, same reasoning as _apply_seed_context/_start_llm_trace.
     set_active_source_coverage_collector(SourceCoverageCollector())
     seed_provider_supported = _apply_seed_context(base_seed=base_seed, ticker=ticker, config=config)
+
+    # Computed exactly once per run, regardless of --trace-llm, so git is
+    # never invoked twice and the trace manifest (when active) reuses these
+    # same values instead of recomputing them independently (see
+    # run_provenance.py and _start_llm_trace's own git_info/package_version
+    # params below).
+    run_git_info = _git_info()
+    run_package_version = _package_version()
+    trace_manifest_path = (
+        str(Path(output_dir) / "debug" / "run_manifest.json")
+        if trace_llm and output_dir is not None
+        else None
+    )
+    run_provenance = build_run_provenance(
+        selected_analysts=selected_analysts, config=config,
+        configured_seed=configured_seed, base_seed=base_seed,
+        trace_llm=trace_llm, trace_manifest_path=trace_manifest_path,
+        git_info=run_git_info, package_version=run_package_version,
+    )
+
     tracer = _start_llm_trace(
         trace_llm=trace_llm, output_dir=output_dir, ticker=ticker,
         analysis_date=analysis_date, selected_analysts=selected_analysts, config=config,
         configured_seed=configured_seed, base_seed=base_seed,
         seed_provider_supported=seed_provider_supported,
+        git_info=run_git_info, package_version=run_package_version,
+        prompt_hashes=run_provenance["prompts"]["hashes"],
     )
     callbacks = [stats_handler] + ([tracer] if tracer is not None else [])
     graph = TradingAgentsGraph(
@@ -460,6 +500,10 @@ def execute_analysis(
     # lives in, with no new return field needed on AnalysisExecution.
     final_state["source_coverage"] = get_source_coverage_snapshot()
     set_active_source_coverage_collector(None)
+    # Unconditional (built above regardless of trace_llm) -- describes the
+    # EXECUTION, not just a successful recommendation, so it is attached to
+    # final_state on both the success and the partial/failed path below.
+    final_state["run_provenance"] = run_provenance
 
     duration_seconds = time.monotonic() - started
     stats = stats_handler.get_stats()
