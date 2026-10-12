@@ -29,6 +29,11 @@ from cli.selections import get_user_selections
 from cli.stats_handler import StatsCallbackHandler
 from tradingagents.agents.fallback_log import fallback_count, reset_fallback_count
 from tradingagents.agents.rating import is_review
+from tradingagents.dataflows.source_coverage import (
+    SourceCoverageCollector,
+    get_source_coverage_snapshot,
+    set_active_source_coverage_collector,
+)
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.default_config import (
     DEFAULT_CONFIG,
@@ -389,6 +394,10 @@ def execute_analysis(
     reset_fallback_count()
     build_analyst_execution_plan(selected_analysts)
     stats_handler = stats_handler or StatsCallbackHandler()
+    # Always on (unlike the seed/trace contexts, which are opt-in) -- a batch
+    # run must not accumulate one ticker's source-coverage entries into the
+    # next, same reasoning as _apply_seed_context/_start_llm_trace.
+    set_active_source_coverage_collector(SourceCoverageCollector())
     seed_provider_supported = _apply_seed_context(base_seed=base_seed, ticker=ticker, config=config)
     tracer = _start_llm_trace(
         trace_llm=trace_llm, output_dir=output_dir, ticker=ticker,
@@ -444,6 +453,13 @@ def execute_analysis(
             final_state.update(chunk)
     finally:
         graph.end_checkpoint()
+
+    # Captured once, right after the graph finishes (success or failure),
+    # into final_state itself -- so write_report_tree/result_document read
+    # it from the exact same place every other analyst's report already
+    # lives in, with no new return field needed on AnalysisExecution.
+    final_state["source_coverage"] = get_source_coverage_snapshot()
+    set_active_source_coverage_collector(None)
 
     duration_seconds = time.monotonic() - started
     stats = stats_handler.get_stats()

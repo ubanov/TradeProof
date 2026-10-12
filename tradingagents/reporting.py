@@ -6,6 +6,7 @@ CLI and ``TradingAgentsGraph.save_reports`` both call this, so a headless / API
 run produces the same on-disk report tree a CLI run does.
 """
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -168,6 +169,15 @@ def write_report_tree(
     validation_summary = render_validation_summary(final_state.get("validation_log", []))
     if validation_summary:
         sections.append(f"## VI. Validation\n\n{validation_summary}")
+
+    # Source coverage (see fork README: "News/Sentiment acquisition"): a
+    # small, secret-free, serializable snapshot of which News/Sentiment
+    # sources returned usable data this run -- written alongside the report
+    # tree so it's inspectable without reopening the LLM trace.
+    if final_state.get("source_coverage"):
+        (save_path / "source_coverage.json").write_text(
+            json.dumps(final_state["source_coverage"], indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
+        )
 
     # Write consolidated report
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"

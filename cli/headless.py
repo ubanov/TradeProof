@@ -402,6 +402,7 @@ def result_document(execution, report_root: Path) -> dict[str, Any]:
         "research_execution": _research_execution(state),
         "validation": summarize_validation_log(state.get("validation_log", [])),
         "base_seed": execution.base_seed,
+        "source_coverage": state.get("source_coverage"),
     }
 
 
@@ -591,6 +592,7 @@ def _error_result(
         "error": str(error),
         "failure_stage": failure_stage,
         "partial": _partial_state_summary(final_state) if final_state else None,
+        "source_coverage": (final_state or {}).get("source_coverage"),
     }
 
 

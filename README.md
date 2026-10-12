@@ -1099,6 +1099,34 @@ The next major validation step is longitudinal:
 > **First make the reasoning auditable and reliable; then measure whether the
 > advice itself has predictive or economic value.**
 
+## News/Sentiment acquisition
+
+An audit of how News and Sentiment data is actually fetched (see
+`tradingagents/dataflows/source_coverage.py`) found that free sources like
+Yahoo news search, StockTwits, and Reddit have no real historical query
+capability — they always serve their current/latest items, which a
+historical run then filters to its own date window. Every run now records a
+compact `source_coverage` snapshot (no payloads, no secrets) classifying each
+source into one of ten states (`SUCCESS_WITH_DATA`, `SUCCESS_EMPTY`,
+`UNSUPPORTED_HISTORICAL`, `AUTH_MISSING`, `RATE_LIMITED`, `PROVIDER_ERROR`,
+`TIMEOUT`, `FILTERED_TO_ZERO`, `NOT_CONFIGURED`, `SCREENED_TO_ZERO`), written
+to `source_coverage.json` alongside the report tree and into `result.json`.
+
+Two states are kept deliberately distinct downstream: **`NO_DATA`** means
+every sentiment source legitimately had nothing to show (point-in-time
+unsupported, a genuinely empty window, screened out, or not configured) — a
+real verdict. **`SOURCE_UNAVAILABLE`** means retrieval itself failed
+(timeout/rate-limit/auth/provider error) and says nothing about whether
+sentiment existed; it must never be read as "no sentiment observed."
+
+When no sentiment source has usable content, the Sentiment Analyst
+**short-circuits**: it builds a deterministic report (`data_status=NO_DATA` or
+`SOURCE_UNAVAILABLE`) without calling the LLM at all, rather than spending a
+call on three placeholder strings. The rendered report always leads with
+`Sentiment data status` in that case — **a Neutral band/5.0 score is never
+presented as evidence of neutral sentiment**; it is a schema-required
+placeholder, clearly labeled as one.
+
 ## Operational scale and local hardware
 
 A Medium-depth analysis with every analyst enabled is not a single LLM call. It

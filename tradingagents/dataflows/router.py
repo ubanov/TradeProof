@@ -6,6 +6,7 @@ from tradingagents.dataflows.errors import (
     VendorNotConfiguredError,
     VendorRateLimitError,
 )
+from tradingagents.dataflows.source_coverage import record_news_router_outcome
 from tradingagents.dataflows.vendors.alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
     get_cashflow as get_alpha_vantage_cashflow,
@@ -216,20 +217,23 @@ def route_to_vendor(method: str, *args, **kwargs):
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
         try:
-            return impl_func(*args, **kwargs)
+            result = impl_func(*args, **kwargs)
         except VendorRateLimitError as e:
             logger.warning("Vendor %r unavailable for %s: %s; trying next vendor.", vendor, method, e)
             # Kept so an all-unavailable chain can say the vendor was the
             # problem, rather than reporting nothing about the symbol.
             last_unavailable = e
+            record_news_router_outcome(method, vendor, args, exc=e)
             continue
         except VendorNotConfiguredError as e:
             logger.warning("Vendor %r not configured for %s; trying next vendor.", vendor, method)
             if first_error is None:
                 first_error = e  # Surface it if no other vendor can serve the call.
+            record_news_router_outcome(method, vendor, args, exc=e)
             continue
         except NoMarketDataError as e:
             last_no_data = e  # No data here; another configured vendor may have it
+            record_news_router_outcome(method, vendor, args, exc=e)
             continue
         except Exception as e:
             # Don't let one vendor's failure crash the call when another can
@@ -238,7 +242,11 @@ def route_to_vendor(method: str, *args, **kwargs):
             logger.warning("Vendor %r failed for %s: %s", vendor, method, e)
             if first_error is None:
                 first_error = e
+            record_news_router_outcome(method, vendor, args, exc=e)
             continue
+        else:
+            record_news_router_outcome(method, vendor, args, text=result)
+            return result
 
     # If any vendor reported "no data", the symbol is genuinely unavailable.
     # Return one explicit, instructive sentinel rather than a vendor-specific

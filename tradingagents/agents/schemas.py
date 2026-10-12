@@ -1114,6 +1114,33 @@ class SentimentScoreSource(str, Enum):
 
     MODEL = "MODEL"
     INFERRED_FROM_BAND = "INFERRED_FROM_BAND"
+    # Set only by the deterministic NO_DATA/SOURCE_UNAVAILABLE short-circuit
+    # (see analysts/sentiment_analyst.py) -- the whole report is built in
+    # code with no model call at all, so the score is neither the model's
+    # judgment nor inferred from a model-supplied band; it is a schema
+    # placeholder (see SentimentDataStatus) and must read as one.
+    NO_DATA_DEFAULT = "NO_DATA_DEFAULT"
+
+
+class SentimentDataStatus(str, Enum):
+    """Whether ``SentimentReport`` reflects real retrieved evidence.
+
+    Distinct from ``overall_band``/``overall_score``, which the schema
+    requires to always hold a value: a bare "Neutral"/5.0 is otherwise
+    indistinguishable between "the evidence was genuinely neutral" and "no
+    evidence existed at all" (audit finding -- see fork README: "News/
+    Sentiment acquisition"). ``NO_DATA`` and ``SOURCE_UNAVAILABLE`` are
+    kept separate on purpose: the first is a real verdict (every source
+    legitimately had nothing to show -- point-in-time unsupported,
+    genuinely empty window, screened out, or not configured); the second
+    means retrieval itself failed (timeout/rate-limit/auth/provider error)
+    and says nothing about whether sentiment existed, so it must never be
+    presented as "no sentiment observed."
+    """
+
+    HAS_DATA = "HAS_DATA"
+    NO_DATA = "NO_DATA"
+    SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE"
 
 
 class SentimentReport(BaseModel):
@@ -1173,6 +1200,10 @@ class SentimentReport(BaseModel):
         default=SentimentScoreSource.MODEL,
         description="Derived automatically; do not set this yourself.",
     )
+    data_status: SentimentDataStatus = Field(
+        default=SentimentDataStatus.HAS_DATA,
+        description="Derived automatically; do not set this yourself.",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -1191,12 +1222,22 @@ class SentimentReport(BaseModel):
         trusted from the model -- the same principle already applied to
         ``ConvictionScore.total`` -- so an inferred score can never be
         represented as the model's own judgment.
+
+        The one exception is the deterministic NO_DATA/SOURCE_UNAVAILABLE
+        short-circuit (see analysts/sentiment_analyst.py): it constructs this
+        model directly with ``score_source=NO_DATA_DEFAULT`` already set, and
+        that value is preserved as-is rather than overwritten to MODEL below
+        -- the model never sees "NO_DATA_DEFAULT" anywhere in its own schema
+        description, so there's no way a real LLM response could set it, and
+        the whole report is already fully determined by code when it fires.
         """
         if not isinstance(data, dict):
             return data
         data = dict(data)
         if "overall_band" not in data and "band" in data:
             data["overall_band"] = data.pop("band")
+        if data.get("score_source") == SentimentScoreSource.NO_DATA_DEFAULT.value:
+            return data
         if data.get("overall_score") is None:
             band_key = str(data.get("overall_band", "")).strip().lower()
             midpoint = _SENTIMENT_BAND_SCORE_MIDPOINT.get(band_key)
@@ -1214,7 +1255,31 @@ def render_sentiment_report(report: SentimentReport) -> str:
     The structured header (band + score + confidence) is prepended to the
     narrative so the saved report is both human-readable and machine-parseable
     without regex.
+
+    When ``data_status`` is not ``HAS_DATA``, the header leads with that
+    status instead of a bare "Overall Sentiment: Neutral" line -- a
+    downstream reader (Research Manager, Trader, a human skimming the
+    report) must never mistake a schema-required Neutral/5.0 placeholder for
+    an observed neutral sentiment signal (audit finding; see fork README:
+    "News/Sentiment acquisition"). ``overall_band``/``overall_score`` are
+    still rendered, clearly labeled as placeholders, so the exact contractual
+    shape downstream parsers already expect is never removed, only
+    disambiguated.
     """
+    if report.data_status != SentimentDataStatus.HAS_DATA:
+        return "\n".join([
+            f"**Sentiment data status:** **{report.data_status.value}**",
+            "**Observed sentiment:** UNKNOWN",
+            f"**Confidence:** {report.confidence.capitalize()}",
+            (
+                f"**Note:** overall_band/overall_score below "
+                f"({report.overall_band.value} / {report.overall_score:.1f}) are schema "
+                "placeholders required by this report's contract, NOT an observed "
+                "sentiment signal."
+            ),
+            "",
+            report.narrative,
+        ])
     return "\n".join([
         f"**Overall Sentiment:** **{report.overall_band.value}** "
         f"(Score: {report.overall_score:.1f}/10)",
