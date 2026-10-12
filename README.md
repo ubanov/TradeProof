@@ -15,7 +15,7 @@ applies in full here.
 
 TradeProof began as a fork of
 [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)
-(upstream **TradingAgents v0.5.2**) and still shares a meaningful part of its
+(upstream **TradingAgents v0.5.1**) and still shares a meaningful part of its
 original package structure and conventions. Since that starting point it has
 diverged significantly from upstream — in model routing, research
 verification, canonical research state, risk analysis design, observability,
