@@ -93,11 +93,13 @@ def test_trade_date_is_injected_not_model_visible(tool):
 # --- the instrument's identity -------------------------------------------------
 
 @pytest.mark.unit
-def test_a_historical_run_is_told_the_identity_is_current(monkeypatch):
+def test_a_historical_run_withholds_sector_industry_exchange(monkeypatch):
     """The company name, sector and industry come from today's vendor profile.
-    They are usually right for a past date, but a company that renamed or was
-    reclassified since would read wrong, and every agent is told to anchor to
-    this identity, so the run has to know which date it describes."""
+    A company that renamed or was reclassified since would read wrong, and
+    every agent is told to anchor to this identity -- so sector/industry/
+    exchange, the fields most likely to have changed, are withheld entirely
+    for a historical run rather than merely flagged; only the bare name
+    (plus quote type) anchor ticker->company identity (#814)."""
     from tradingagents.agents.context import build_instrument_context
 
     identity = {"company_name": "Example Corp", "sector": "Technology",
@@ -105,7 +107,11 @@ def test_a_historical_run_is_told_the_identity_is_current(monkeypatch):
 
     historical = build_instrument_context("EXMP", "stock", identity, curr_date="2024-03-14")
     assert "Example Corp" in historical
-    assert "2024-03-14" in historical and "today" in historical.lower()
+    assert "2024-03-14" in historical
+    assert "intentionally withheld" in historical.lower()
+    assert "Technology" not in historical
+    assert "Software" not in historical
+    assert "NMS" not in historical
 
 
 @pytest.mark.unit

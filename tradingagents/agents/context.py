@@ -109,10 +109,17 @@ def build_instrument_context(
     classification are injected so agents anchor to the real company rather
     than pattern-matching the price chart to a wrong one (#814).
 
-    That profile carries no historical vintage: it describes the company today.
-    For a run dated earlier, the context says so, since a company that has since
-    renamed or been reclassified would otherwise anchor the whole graph to an
-    identity it did not have on the analysis date.
+    That profile carries no historical vintage: it describes the company
+    today. For a LIVE run (``curr_date`` empty or not in the past) the full
+    profile is used exactly as before. For a run dated in the past, only the
+    current company name (plus quote type, when present) is kept as a bare
+    ticker->identity anchor -- sector, industry and exchange are withheld
+    entirely rather than merely flagged, since those are exactly the fields
+    most likely to have changed since ``curr_date`` (reclassification,
+    uplisting/delisting) and the anchor's only job (#814) is naming the
+    right company, not describing it. This mirrors the withholding already
+    applied to the Fundamentals profile tool for the same underlying "no
+    historical vintage" reason (``date_window.withhold_live_profile``, #1300).
     """
     is_crypto = asset_type == "crypto"
     instrument_label = "asset" if is_crypto else "instrument"
@@ -122,8 +129,30 @@ def build_instrument_context(
         "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`, `-USD`)."
     )
 
-    details = []
-    if identity:
+    is_historical = bool(curr_date) and str(curr_date) < get_current_date()
+
+    if identity and is_historical:
+        name = identity.get("company_name") or identity.get("name")
+        name_label = "Current vendor-reported name" if is_crypto else "Current vendor-reported company name"
+        anchor_lines = [f"Ticker: {ticker}"]
+        if name:
+            anchor_lines.append(f"{name_label}: {name}")
+        if identity.get("quote_type"):
+            anchor_lines.append(f"Quote type: {identity['quote_type']}")
+        subject = "asset" if is_crypto else "company"
+        context += (
+            "\n\nHistorical instrument identity anchor:\n"
+            + "\n".join(anchor_lines)
+            + (
+                f"\n\nThe current {'name' if is_crypto else 'company name'} above is used only to "
+                f"anchor ticker-to-identity and prevent substitution of a different {subject}. "
+                f"It is not point-in-time evidence for {curr_date}.\n\n"
+                "Historical sector, industry and exchange metadata are unavailable; "
+                "current vendor values are intentionally withheld to avoid look-ahead."
+            )
+        )
+    elif identity:
+        details = []
         name = identity.get("company_name") or identity.get("name")
         if name:
             details.append(f"{'Name' if is_crypto else 'Company'}: {name}")
@@ -136,19 +165,11 @@ def build_instrument_context(
             details.append(f"Industry: {industry}")
         if identity.get("exchange"):
             details.append(f"Exchange: {identity['exchange']}")
-
-    if details:
-        context += (
-            f" Resolved identity: {'; '.join(details)}. "
-            "Do not substitute a different company or ticker unless a tool "
-            "result explicitly disproves this resolved identity."
-        )
-        today = get_current_date()
-        if curr_date and str(curr_date) < today:
+        if details:
             context += (
-                f" This identity is how the vendor describes the instrument today, "
-                f"not necessarily on {curr_date}: a name or classification changed "
-                f"since then would read as the current one."
+                f" Resolved identity: {'; '.join(details)}. "
+                "Do not substitute a different company or ticker unless a tool "
+                "result explicitly disproves this resolved identity."
             )
 
     if is_crypto:
