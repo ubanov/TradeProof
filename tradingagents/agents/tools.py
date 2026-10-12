@@ -4,13 +4,26 @@ Each dated tool takes the run's ``trade_date`` from graph state (``InjectedState
 and never serves data past it, whatever date the model asks for.
 """
 
+from datetime import datetime, timedelta
 from typing import Annotated
 
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
+from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.date_window import as_of, as_of_window
+from tradingagents.dataflows.errors import VendorRateLimitError
 from tradingagents.dataflows.router import route_to_vendor
+from tradingagents.dataflows.source_coverage import (
+    SourceCoverageEntry,
+    SourceStatus,
+    classify_router_exception,
+    record_source_coverage,
+)
+from tradingagents.dataflows.vendors.sec_edgar_events import (
+    fetch_company_events,
+    render_company_events,
+)
 from tradingagents.dataflows.vendors.yahoo.snapshot import build_verified_market_snapshot
 
 
@@ -282,3 +295,62 @@ def get_prediction_markets(
         str: A formatted markdown report of matching prediction markets
     """
     return route_to_vendor("get_prediction_markets", topic, limit, trade_date or None)
+
+
+@tool
+def get_company_events(
+    ticker: Annotated[str, "ticker symbol of the company"],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the end of the window"],
+    look_back_days: Annotated[
+        int | None, "Trailing window length in days; omit for the configured default (30)"
+    ] = None,
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """
+    Retrieve SEC EDGAR company events: Form 8-K material-event filings for
+    ticker, filed within the trailing window ending curr_date. These are
+    regulatory filings (SEC-mandated disclosures), NOT press/news coverage
+    -- a company can go long stretches with no 8-K that reads as news, and
+    most 8-Ks are index metadata plus a short best-effort excerpt of the
+    primary document's own text, never an LLM-written summary. Categorized
+    deterministically by SEC's own Item codes (e.g. 2.02 = earnings/
+    results, 5.02 = management/director change) -- never an opinion of
+    materiality beyond what SEC's own taxonomy already encodes. Only form
+    8-K is covered; this is a complement to news/global news/macro data,
+    never a substitute for a real news archive.
+
+    Args:
+        ticker (str): Ticker symbol of the company
+        curr_date (str): Current date in yyyy-mm-dd format
+        look_back_days (int): Trailing window length; omit for the default
+
+    Returns:
+        str: A compact listing of 8-K events in the window, or a clear
+        "no events found" notice -- never a full filing's text.
+    """
+    as_of_date = as_of(curr_date, trade_date)
+    window_days = (
+        look_back_days if look_back_days is not None else get_config()["sec_company_events_lookback_days"]
+    )
+    start_date = (datetime.strptime(as_of_date, "%Y-%m-%d") - timedelta(days=window_days)).strftime("%Y-%m-%d")
+    try:
+        events, raw_count = fetch_company_events(ticker, as_of_date, window_days)
+    except VendorRateLimitError as exc:
+        record_source_coverage(
+            "company_events", "sec_edgar",
+            SourceCoverageEntry(
+                source="sec_edgar", status=classify_router_exception(exc), usable_count=0, reason=str(exc)[:200],
+                requested_start=start_date, requested_end=as_of_date,
+            ),
+        )
+        return f"SEC EDGAR company events are currently unavailable ({exc}). Proceed without this source."
+
+    status = SourceStatus.SUCCESS_WITH_DATA if events else SourceStatus.SUCCESS_EMPTY
+    record_source_coverage(
+        "company_events", "sec_edgar",
+        SourceCoverageEntry(
+            source="sec_edgar", status=status, raw_count=raw_count, usable_count=len(events),
+            requested_start=start_date, requested_end=as_of_date,
+        ),
+    )
+    return render_company_events(events, ticker, start_date, as_of_date)

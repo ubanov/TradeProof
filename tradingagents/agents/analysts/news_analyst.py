@@ -2,6 +2,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.context import get_instrument_context_from_state, get_language_instruction
 from tradingagents.agents.tools import (
+    get_company_events,
     get_global_news,
     get_macro_indicators,
     get_news,
@@ -16,6 +17,7 @@ TOOLS = (
     get_global_news,
     get_macro_indicators,
     get_prediction_markets,
+    get_company_events,
 )
 
 

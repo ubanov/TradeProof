@@ -1127,6 +1127,26 @@ call on three placeholder strings. The rendered report always leads with
 presented as evidence of neutral sentiment**; it is a schema-required
 placeholder, clearly labeled as one.
 
+### SEC EDGAR company events
+
+The News Analyst can also call `get_company_events`, which reads SEC EDGAR's
+filing index (`data.sec.gov/submissions/...`) for a ticker and returns its
+**Form 8-K** filings in a trailing window (30 days by default) — this first
+version covers 8-K only, not Form 4, 10-Q/10-K content, or 6-K. Point-in-time
+is gated strictly on `filingDate` (never the period a filing reports on), so
+a filing filed after the analysis date can never reach the agent. Each 8-K is
+categorized deterministically from SEC's own Item codes (e.g. `2.02` =
+earnings/results, `5.02` = management/director change) — never an LLM
+judgment of materiality.
+
+SEC company events are **regulatory filings, not press/news coverage**: a
+company can go a 30-day window with zero 8-Ks, which is a real,
+non-suspicious outcome, not a failure. Most 8-Ks are thin "furnished"
+wrappers pointing at an exhibit this version does not fetch — when no usable
+excerpt can be extracted from the filing's own primary document,
+`content_status=WRAPPER_ONLY` says so explicitly rather than hiding the gap.
+This is a complement to News, never a substitute for a real news archive.
+
 ## Operational scale and local hardware
 
 A Medium-depth analysis with every analyst enabled is not a single LLM call. It
