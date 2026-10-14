@@ -33,7 +33,7 @@ def test_1_checkout_pyproject_wins_over_stale_installed_metadata(monkeypatch):
     monkeypatch.setattr(
         "importlib.metadata.version", _stale_installed_metadata, raising=True
     )
-    assert llm_trace._package_version() == "0.9.1"
+    assert llm_trace._package_version() == "0.10.0"
 
 
 @pytest.mark.unit
@@ -92,7 +92,7 @@ def test_5_implementation_never_hardcodes_the_current_version_string():
     import inspect
 
     source = inspect.getsource(llm_trace._package_version)
-    assert "0.9.1" not in source
+    assert "0.10.0" not in source
 
 
 @pytest.mark.unit
