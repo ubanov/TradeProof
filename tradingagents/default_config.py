@@ -234,6 +234,14 @@ def resolve_validation_config(config: dict) -> dict:
 
 DEFAULT_CONFIG = resolve_role_config(_apply_env_overrides({
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR") or os.path.join(_TRADINGAGENTS_HOME, "logs"),
+    # Independent of results_dir/--output-dir on purpose (see fork README:
+    # "RecommendationRecord"): results_dir means different things for
+    # interactive (a stable multi-run root) and headless (overwritten to
+    # that invocation's own --output-dir), so it cannot double as a stable,
+    # global ledger location. ledger_root is the one place every frontend
+    # writes RecommendationRecord to, regardless of where that run's own
+    # result.json/complete_report.md happen to live.
+    "ledger_root": os.getenv("TRADINGAGENTS_LEDGER_ROOT") or os.path.join(_TRADINGAGENTS_HOME, "ledger"),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR") or os.path.join(_TRADINGAGENTS_HOME, "cache"),
     "memory_log_path": os.getenv("TRADINGAGENTS_MEMORY_LOG_PATH") or os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md"),
     # Optional cap on the number of resolved memory log entries. When set,

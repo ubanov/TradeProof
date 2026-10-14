@@ -25,6 +25,7 @@ from cli.display import (
     update_display,
     update_research_team_status,
 )
+from cli.result_document import persist_successful_run
 from cli.selections import get_user_selections
 from cli.stats_handler import StatsCallbackHandler
 from tradingagents.agents.fallback_log import fallback_count, reset_fallback_count
@@ -191,6 +192,18 @@ def _run_directory(config: dict, ticker: str, trade_date: str) -> Path:
     ".." here would place the run outside the results directory.
     """
     return Path(config["results_dir"]) / safe_ticker_component(ticker) / trade_date
+
+
+def automatic_run_dir(results_dir: Path) -> Path:
+    """A fresh, unique canonical-artifacts directory under ``results_dir``
+    (see ``_run_directory``), shared by the interactive flow and
+    ``tradingagents run`` when ``--output-dir`` is omitted (see
+    ``cli/main.py::run_non_interactive``) -- the microsecond timestamp means
+    two runs of the same ticker/date never overwrite each other's
+    result.json/complete_report.md. Never duplicated: both callers go
+    through this one function.
+    """
+    return Path(results_dir) / "runs" / datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
 
 def _announce_checkpoint_state(graph, ticker: str, trade_date: str) -> None:
@@ -591,6 +604,14 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None):
     report_dir.mkdir(parents=True, exist_ok=True)
     log_file = results_dir / "message_tool.log"
     log_file.touch(exist_ok=True)
+    # Canonical artifacts (complete_report.md, result.json) for THIS run, so a
+    # successful interactive recommendation can be frozen into the ledger the
+    # same way `run`/`batch` already are -- never the user's own later "Save
+    # report?" export path, and never results_dir itself, which two runs of
+    # the same ticker/date already share (message_tool.log, reports/) and
+    # would otherwise silently overwrite one run's canonical artifacts with
+    # the next (see fork README: "RecommendationRecord").
+    canonical_run_dir = automatic_run_dir(results_dir)
 
     def save_message_decorator(obj, func_name):
         func = getattr(obj, func_name)
@@ -761,6 +782,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None):
             asset_type=selections["asset_type"],
             config=config,
             portfolio=portfolio,
+            output_dir=canonical_run_dir,
             stats_handler=stats_handler,
             on_chunk=handle_chunk,
             on_checkpoint=lambda graph: _announce_checkpoint_state(
@@ -768,6 +790,16 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None):
             ),
         )
         final_state = execution.final_state
+
+        # Unconditional: a complete, successful run is recorded regardless of
+        # whether the user later chooses to export/save a copy of the report
+        # below -- making that export the gate would introduce selection bias
+        # into any future longitudinal evaluation (see fork README:
+        # "RecommendationRecord").
+        persist_successful_run(
+            execution=execution, config=config, output_dir=canonical_run_dir,
+            progress=lambda text: message_buffer.add_message("System", text),
+        )
 
         for agent in message_buffer.agent_status:
             message_buffer.update_agent_status(agent, "completed")

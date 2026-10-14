@@ -366,6 +366,49 @@ most from upstream; the full, detailed list is in
   leverage, or position size** — actual position sizing remains the
   Trader/Portfolio Manager's job and is not implemented by this value.
 
+### RecommendationRecord (v1)
+
+- A separate, **immutable, append-only** JSON record is written per
+  successful recommendation, under
+  `<ledger_root>/recommendations/<ticker>/<recommendation_id>.json` — one
+  file per recommendation, never modified after creation. It is built from
+  structured state (`result["structured"]`, `result["run_provenance"]`), not
+  regex, and includes the final decision, trade plan, research/validation
+  summary, source coverage, and sha256 hashes of `result.json` and the
+  report. A `record_hash` over the whole record (excluding itself) lets
+  `verify_recommendation_record` detect any later tampering.
+
+- **Run artifacts and the ledger are separate storages.** `result.json` and
+  `complete_report.md` stay exactly where they always did (the run's own
+  `--output-dir`, or the interactive run's managed directory); the ledger
+  lives at its own `ledger_root`, independent of any run's `--output-dir`,
+  so it is never fragmented across however many output directories a user
+  has ever pointed the CLI at. Default `ledger_root` is
+  `~/.tradingagents/ledger`, overridable with `TRADINGAGENTS_LEDGER_ROOT` —
+  deliberately its own setting, not reused from `--output-dir`/`results_dir`
+  (their semantics already differ between interactive and headless). A
+  record's `artifacts.result_path`/`report_path` are absolute paths to its
+  run's own files, since the record no longer lives next to them.
+
+- This is **independent of the existing decision log**
+  (`decision_log.py`, see [Persistence and Recovery](#persistence-and-recovery)):
+  the decision log is mutable agent working memory fed back into future
+  prompts, while a RecommendationRecord is a fixed audit entry. Both exist
+  side by side and neither replaces the other.
+
+- A record is **not an outcome**. It freezes what TradeProof recommended and
+  under what code/models/evidence — it says nothing about whether the market
+  agreed. Predictive ability is still not validated (see
+  [Current validation stage](#current-validation-stage)). A separate
+  `RecommendationOutcome` (did the market move as predicted) is future work,
+  not implemented here.
+
+- This applies to every normal frontend, including the interactive CLI:
+  interactive report export is optional, but successful interactive
+  recommendations are always recorded in the immutable ledger — a manual
+  save/export choice must never decide what enters a future longitudinal
+  evaluation.
+
 ### Non-interactive and batch CLI execution
 
 - Added non-interactive CLI execution so TradingAgents can be run from scripts
@@ -400,6 +443,27 @@ most from upstream; the full, detailed list is in
   Example — analyze three tickers with every other setting defaulted:
   ```bash
   tradingagents batch --tickers NVDA,SPY,BTC-USD
+  ```
+
+- `tradingagents run` only requires `--ticker`; every other option defaults
+  the same way `batch`'s do (explicit flag, then env var where one applies,
+  then a hardcoded/config fallback):
+  - `--date`: today's date, same as `batch`;
+  - `--analysts`: `TRADINGAGENTS_ANALYSTS`, else all four, same as `batch`;
+  - `--depth`: `TRADINGAGENTS_DEPTH`, else `medium`, same as `batch`;
+  - `--language`: the configured `output_language`
+    (`TRADINGAGENTS_OUTPUT_LANGUAGE` when set, else `English`), same as `batch`;
+  - `--output-dir`: unlike `batch`'s shared `.\test\<date>` root for every
+    ticker, a single `run` gets its own fresh, automatic directory under
+    `<results_dir>/<ticker>/<date>/runs/<timestamp>/` — the same convention
+    the interactive CLI uses (see "RecommendationRecord" below), so two runs
+    of the same ticker/date never overwrite each other's `result.json`/
+    `complete_report.md`. The RecommendationRecord ledger itself is
+    unaffected either way — it always lives at its own `ledger_root`.
+
+  Example — the minimum to run one analysis:
+  ```bash
+  tradingagents run --ticker LLY
   ```
 
 ### Model roles: Generation / Validation / Review
@@ -1222,26 +1286,23 @@ considered part of the implemented architecture until they are completed.
 
 ### Rich immutable recommendation tracking
 
+**v1 implemented** — see [RecommendationRecord (v1)](#recommendationrecord-v1)
+above for what is already written per run. The remainder of this section
+describes what is still planned on top of it.
+
 TradingAgents already provides a decision log and a backtesting facility (see
 [Persistence and Recovery](#persistence-and-recovery) and
-[Evaluating decisions over time](#evaluating-decisions-over-time)). The planned
-TradeProof extension goes further: preserve the **complete structured decision
-state** needed to reconstruct what the system recommended and why.
+[Evaluating decisions over time](#evaluating-decisions-over-time)).
 
-Planned fields include:
+Still planned on top of the v1 record:
 
-- Bull and Bear initial/final theses and conviction trails;
-- Research Manager recommendation;
-- Trader plan and final Portfolio Manager rating/disposition;
-- entry range/reference, stop, target, horizon, deterministic trade metrics;
-- key evidence/provenance and known data gaps;
-- TradeProof version/commit, prompt hashes, model routing, and a report hash.
-
-The historical record should be immutable after creation. Subsequent market data
-may append outcomes, but must never rewrite the original recommendation. Useful
-measurements may include entry triggered/not triggered, target/stop reached,
-expiry at horizon, realised return, alpha against an appropriate benchmark,
-maximum favourable/adverse excursion, realised R, and time to outcome.
+- `RecommendationOutcome`: appending realised market outcomes (entry
+  triggered/not triggered, target/stop reached, expiry at horizon, realised
+  return, alpha against an appropriate benchmark, maximum favourable/adverse
+  excursion, realised R, time to outcome) without ever rewriting the original
+  record;
+- `recommendation_id`/`record_hash` cross-referencing for a future ledger
+  index (SQLite or similar) once enough records accumulate.
 
 ### Historical feedback
 
@@ -1467,6 +1528,8 @@ tradingagents          # installed command
 python -m cli.main     # alternative: run directly from source
 ```
 You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more. Your previous run's answers come back as the defaults, so pressing Enter accepts them. The `TRADINGAGENTS_*` variables in `.env` still skip their step entirely.
+
+**Manual validation runs**: when pointing `--output-dir`/`TRADINGAGENTS_LEDGER_ROOT` somewhere just to inspect a run by hand, prefer `$env:TEMP` (PowerShell) / `$TMPDIR` (bash) or any path outside the checkout, rather than a folder inside it — a stray result tree or ledger left in the repo root is easy to `git add` by accident. If you do use an in-checkout folder for this, name it `_run-test`/`_ledger-test` (already gitignored) rather than a name that could collide with a real results/ledger path.
 
 ### Markets and tickers
 

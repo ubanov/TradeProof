@@ -109,11 +109,20 @@ def test_empty_path_value_keeps_the_default_path(monkeypatch):
         TRADINGAGENTS_RESULTS_DIR="",
         TRADINGAGENTS_CACHE_DIR="",
         TRADINGAGENTS_MEMORY_LOG_PATH="",
+        TRADINGAGENTS_LEDGER_ROOT="",
     )
     home = dc._TRADINGAGENTS_HOME
     assert dc.DEFAULT_CONFIG["results_dir"] == os.path.join(home, "logs")
     assert dc.DEFAULT_CONFIG["data_cache_dir"] == os.path.join(home, "cache")
     assert dc.DEFAULT_CONFIG["memory_log_path"] == os.path.join(home, "memory", "trading_memory.md")
+    # Independent of results_dir on purpose (see fork README:
+    # "RecommendationRecord") -- its own stable default, not derived from it.
+    assert dc.DEFAULT_CONFIG["ledger_root"] == os.path.join(home, "ledger")
+
+
+def test_ledger_root_env_override(monkeypatch, tmp_path):
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_LEDGER_ROOT=str(tmp_path / "custom_ledger"))
+    assert dc.DEFAULT_CONFIG["ledger_root"] == str(tmp_path / "custom_ledger")
 
 
 def test_invalid_int_raises(monkeypatch):

@@ -16,7 +16,7 @@ from cli.headless import (
     run_single_analysis,
     timestamped_echo,
 )
-from cli.run import run_analysis
+from cli.run import _run_directory, automatic_run_dir, run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.benchmark_replay import (
     SUPPORTED_STAGES,
@@ -106,16 +106,31 @@ def analyze(
 @app.command("run")
 def run_non_interactive(
     ticker: str = typer.Option(..., "--ticker", help="Ticker symbol to analyze"),
-    date: str = typer.Option(..., "--date", help="Analysis date, YYYY-MM-DD"),
-    analysts: str = typer.Option(
-        ..., "--analysts", help="Comma-separated analysts"
+    date: str | None = typer.Option(
+        None, "--date",
+        help="Analysis date, YYYY-MM-DD. Defaults to today (fixed at startup, so a "
+        "run crossing midnight stays on the day it started).",
     ),
-    depth: str = typer.Option(
-        ..., "--depth", help="Research depth: shallow, medium, or deep"
+    analysts: str | None = typer.Option(
+        None, "--analysts",
+        help="Comma-separated analysts. Defaults to $TRADINGAGENTS_ANALYSTS, or all four.",
     ),
-    language: str = typer.Option(..., "--language", help="Output language"),
-    output_dir: Path = typer.Option(  # noqa: B008 - Typer option declaration
-        ..., "--output-dir", help="Directory for the report and result.json"
+    depth: str | None = typer.Option(
+        None, "--depth",
+        help="Research depth: shallow, medium, or deep. Defaults to $TRADINGAGENTS_DEPTH, "
+        "or medium -- TradeProof prioritizes quality over speed; pass --depth "
+        "shallow explicitly for smoke tests.",
+    ),
+    language: str | None = typer.Option(
+        None, "--language",
+        help="Output language. Defaults to the configured output_language "
+        "($TRADINGAGENTS_OUTPUT_LANGUAGE when set, else English).",
+    ),
+    output_dir: Path | None = typer.Option(  # noqa: B008 - Typer option declaration
+        None, "--output-dir",
+        help="Directory for the report and result.json. Defaults to an automatic, "
+        "unique directory per run, under the same results layout the interactive "
+        "CLI uses (see fork README: 'RecommendationRecord').",
     ),
     generation_llm: str | None = typer.Option(
         None, "--TRADINGAGENTS_GENERATION_LLM", "--generation-llm",
@@ -195,17 +210,48 @@ def run_non_interactive(
         "guaranteed bit-for-bit identical output.",
     ),
 ):
-    """Run one analysis without interactive prompts."""
+    """Run one analysis without interactive prompts.
+
+    Only --ticker is required; every other option falls back to an explicit
+    flag, then an environment variable (where one applies), then a
+    hardcoded/config-derived default -- the same precedence `batch` already
+    uses (see fork README: "Non-interactive and batch CLI execution").
+    """
     echo = timestamped_echo()
+    # Resolved at call time, never at import/module-load time, so a run
+    # started just before midnight keeps using the day it started on and a
+    # process that stays up for days doesn't freeze a stale date.
+    date = date or datetime.now().strftime("%Y-%m-%d")
+    analysts = analysts or os.environ.get("TRADINGAGENTS_ANALYSTS") or _DEFAULT_ANALYSTS
+    depth = depth or os.environ.get("TRADINGAGENTS_DEPTH") or _DEFAULT_DEPTH
+    # DEFAULT_CONFIG["output_language"] already folds in TRADINGAGENTS_OUTPUT_LANGUAGE
+    # at import time; the explicit os.environ check mirrors `batch`'s own
+    # wording/precedence exactly, so neither command's behavior is a surprise
+    # relative to the other.
+    language = (
+        language
+        or os.environ.get("TRADINGAGENTS_OUTPUT_LANGUAGE")
+        or DEFAULT_CONFIG["output_language"]
+    )
     try:
         _, depth_value = parse_depth(depth)
         analyst_names = parse_analysts(analysts)
         configured_seed = validate_configured_seed(
             seed if seed is not None else DEFAULT_CONFIG.get("seed", 0)
         )
+        if output_dir is None:
+            # Same convention the interactive flow uses (see
+            # cli/run.py::automatic_run_dir): a fresh, unique directory per
+            # run, so two runs of the same ticker/date never overwrite each
+            # other's result.json/complete_report.md.
+            results_dir = _run_directory(
+                {"results_dir": DEFAULT_CONFIG["results_dir"]}, ticker, date
+            )
+            output_dir = automatic_run_dir(results_dir)
         base_seed = resolve_base_seed(configured_seed)
         echo(f"Run seed: {base_seed}")
         echo(f"Analysis date: {date}")
+        echo(f"Output directory: {output_dir.resolve()}")
         result = run_single_analysis(
             ticker=ticker,
             analysis_date=date,

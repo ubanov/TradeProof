@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cli.headless import _structured_section, result_document
+from cli.result_document import _structured_section, result_document
 
 # Reuse the exact fixtures test_structured_agents.py already established for
 # the Trader/Research Manager happy-path shape, rather than re-inventing a

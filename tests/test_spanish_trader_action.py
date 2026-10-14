@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cli.headless import result_document
+from cli.result_document import result_document
 
 
 def _execution(trader_plan, research_plan="", final_decision="", rating="REVIEW"):

@@ -13,10 +13,10 @@ import cli.headless as cli_headless
 import cli.main as cli_main
 from cli.headless import (
     _progress_reporter,
-    result_document,
     run_batch_analysis,
     timestamped_echo,
 )
+from cli.result_document import result_document
 from cli.stats_handler import StatsCallbackHandler
 
 

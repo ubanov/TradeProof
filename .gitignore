@@ -224,3 +224,12 @@ reports/
 /test/
 /nightly/
 /retest/
+
+# Ad-hoc manual validation output (--output-dir/--ledger-root pointed inside
+# the checkout instead of $TEMP or an external path, see fork README: "Manual
+# validation runs") -- never the real results tree or the Recommendation
+# Ledger, both of which live outside the checkout by default.
+/_run-test/
+/_run-test.zip
+/_ledger-test/
+/_ledger-test.zip
