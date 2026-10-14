@@ -113,7 +113,8 @@ def test_2_trader_proposal_appears_faithfully_in_result_json(tmp_path):
     assert result["structured"]["trader_proposal"] == {
         "action": "Sell", "reasoning": "Guidance cut.",
         "entry_price": 100.0, "entry_price_low": None, "entry_price_high": None,
-        "reference_entry": None, "stop_loss": 110.0, "position_sizing": None,
+        "reference_entry": None, "stop_loss": 110.0, "take_profit": None,
+        "position_sizing": None,
     }
 
 

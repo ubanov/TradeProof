@@ -258,13 +258,17 @@ class DecisionRef(BaseModel):
 
 class TradePlanRef(BaseModel):
     """Only fields the Trader's own structured proposal actually carries are
-    ever non-null. ``take_profit``/``risk_reward``/``atr_stop_distance``/
-    ``atr_target_distance`` stay null in v1: TraderProposal has no
-    take_profit field today, so none of these are computable without
-    inventing one -- the closest existing equivalents are the Bull/Bear
-    research-level trade metrics under ``research.bull_trade_metrics`` /
-    ``research.bear_trade_metrics`` (computed from each side's OWN
-    take_profit/stop_loss claims during debate, not the Trader's)."""
+    ever non-null. ``take_profit`` comes straight from
+    ``TraderProposal.take_profit`` -- null exactly when the Trader itself
+    left it unset (no target was defensible), never backfilled from
+    ``PortfolioDecision.price_target`` (a different agent's, different-
+    purpose field) or invented. ``risk_reward``/``atr_stop_distance``/
+    ``atr_target_distance`` stay null in v1: nothing here recomputes them
+    from the Trader's own entry/stop/take_profit -- the closest existing
+    equivalents are the Bull/Bear research-level trade metrics under
+    ``research.bull_trade_metrics``/``research.bear_trade_metrics``
+    (computed from each side's OWN take_profit/stop_loss claims during
+    debate, not the Trader's)."""
 
     action: str | None = None
     entry_price: float | None = None
@@ -481,6 +485,11 @@ def build_recommendation_record(
         entry_price_high=trader_proposal.get("entry_price_high"),
         reference_entry=trader_proposal.get("reference_entry"),
         stop_loss=trader_proposal.get("stop_loss"),
+        # Exactly what the Trader itself proposed -- never PortfolioDecision's
+        # price_target, a different agent's, different-purpose field (see
+        # fork README: "RecommendationRecord"). null when the Trader left it
+        # unset, never silently backfilled from another source.
+        take_profit=trader_proposal.get("take_profit"),
     )
 
     horizon = resolve_horizon(portfolio_decision=portfolio_decision, debate=debate, config=config)

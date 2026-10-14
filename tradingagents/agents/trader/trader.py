@@ -34,10 +34,12 @@ from tradingagents.prompts.loader import load_prompt, render_agent_prompt
 _TRADER_CONTRACT = (
     "Produce a transaction proposal: action (Buy/Hold/Sell), reasoning, "
     "optional entry_price (or entry_price_low/entry_price_high for a "
-    "range), optional stop_loss, optional position_sizing. entry_price and "
-    "stop_loss must be absolute prices in the instrument's quote currency, "
-    "never percentages. For a Buy, stop_loss must be below entry_price; "
-    "for a Sell, stop_loss must be above entry_price."
+    "range), optional stop_loss, optional take_profit, optional "
+    "position_sizing. entry_price, stop_loss and take_profit must be "
+    "absolute prices in the instrument's quote currency, never percentages. "
+    "For a Buy, stop_loss must be below entry_price; for a Sell, stop_loss "
+    "must be above entry_price. take_profit is only set when a target is "
+    "actually defensible -- never invented merely because the field exists."
 )
 
 

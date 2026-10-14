@@ -776,6 +776,18 @@ class TraderProposal(BaseModel):
             "distance to the price level it implies, or omit it."
         ),
     )
+    take_profit: float | None = Field(
+        default=None,
+        description=(
+            "Optional take-profit as an absolute price in the instrument's quote "
+            "currency, never a percentage. Set this ONLY when a target is actually "
+            "defensible -- typically the research team's own deterministic target "
+            "(see the trade plan above) preserved or lightly refined, grounded in "
+            "the technical market report's price structure. Leave unset rather than "
+            "inventing a target just because this field exists; the schema allowing "
+            "it is not an instruction to always produce one."
+        ),
+    )
     position_sizing: str | None = Field(
         default=None,
         description=(
@@ -788,7 +800,8 @@ class TraderProposal(BaseModel):
     )
 
     @field_validator(
-        "entry_price", "entry_price_low", "entry_price_high", "reference_entry", "stop_loss",
+        "entry_price", "entry_price_low", "entry_price_high", "reference_entry",
+        "stop_loss", "take_profit",
         mode="before",
     )
     @classmethod
@@ -824,6 +837,7 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
     # Named even when absent, so a reader can tell a level the trader chose not
     # to give from one the schema never asked for.
     for label, value in (("Stop Loss", proposal.stop_loss),
+                         ("Take Profit", proposal.take_profit),
                          ("Position Sizing", proposal.position_sizing)):
         parts.extend(["", f"**{label}**: {value if value is not None and value != '' else 'not provided'}"])
     parts.extend([

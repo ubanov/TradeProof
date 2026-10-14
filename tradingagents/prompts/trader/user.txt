@@ -22,4 +22,5 @@ Write these sections, in this order, starting with the action on its own line:
 - **Reasoning**: why, against the plan and the price structure
 - **Entry Price**: a single absolute price if the verified plan's entry is a single point; both bounds (e.g. "223.13 - 225.45") if the verified plan's entry is a range -- do not invent a midpoint. If you also cite the deterministic reference entry, label it explicitly as a reference/calculated value, not the execution entry.
 - **Stop Loss**: as an absolute price level, when you can state it.
+- **Take Profit**: as an absolute price level, ONLY when a target backed by the research team's deterministic trade plan above is defensible -- preserve or lightly refine it. State it is not provided rather than inventing a target that is not actually supported.
 - **Position Sizing**: only if the portfolio context above supplies the actual holdings/cash needed to compute it; otherwise state it is unknown rather than inventing a percentage or notional amount. LOW/MEDIUM/HIGH research risk classification is not a position size.
