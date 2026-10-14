@@ -148,13 +148,16 @@ def _reset_run_scoped_contextvars():
     directly against a bare ``MagicMock`` LLM and does not expect a
     ``seed=`` kwarg to show up on ``invoke()``.
     """
+    from tradingagents.dataflows.price_basis import set_active_price_basis_collector
     from tradingagents.dataflows.source_coverage import set_active_source_coverage_collector
     from tradingagents.llm_trace import set_active_seed_context, set_active_tracer
 
     set_active_tracer(None)
     set_active_seed_context(None)
     set_active_source_coverage_collector(None)
+    set_active_price_basis_collector(None)
     yield
     set_active_tracer(None)
     set_active_seed_context(None)
     set_active_source_coverage_collector(None)
+    set_active_price_basis_collector(None)

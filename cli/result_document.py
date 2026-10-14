@@ -138,6 +138,7 @@ def result_document(execution, report_root: Path) -> dict[str, Any]:
         "source_coverage": state.get("source_coverage"),
         "structured": _structured_section(state),
         "run_provenance": state.get("run_provenance"),
+        "price_basis": state.get("price_basis"),
     }
 
 
@@ -226,6 +227,7 @@ def _error_result(
         "source_coverage": (final_state or {}).get("source_coverage"),
         "structured": _structured_section(final_state or {}),
         "run_provenance": (final_state or {}).get("run_provenance"),
+        "price_basis": (final_state or {}).get("price_basis"),
     }
 
 

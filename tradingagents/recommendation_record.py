@@ -40,9 +40,15 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 import tradingagents.default_config as default_config_module
-from tradingagents.dataflows.symbols import safe_ticker_component
+from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 
-SCHEMA_VERSION = "1.0"
+#   1.0 -> 1.1: added the optional price_basis block (see PriceBasisSnapshot
+#   below). Backward-compatible: a 1.0 record on disk simply lacks the key,
+#   which Pydantic treats as unset (default None), and
+#   verify_recommendation_record hashes whatever raw keys are present, so
+#   1.0 records keep validating and verifying unchanged. Historical records
+#   are never migrated/rewritten.
+SCHEMA_VERSION = "1.1"
 
 
 class IncompleteRecommendationError(ValueError):
@@ -320,6 +326,49 @@ class ArtifactsRef(BaseModel):
     trace_manifest_path: str | None = None
 
 
+class ReferenceBar(BaseModel):
+    date: str
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: float | None = None
+
+
+class PriceBasisSnapshot(BaseModel):
+    """The price basis a run's Market Analyst actually saw for its own
+    analysis_date -- captured structurally at the shared, cached OHLCV load
+    point every yfinance-backed market-data tool funnels through (see
+    ``tradingagents.dataflows.price_basis``), never parsed from the rendered
+    ``market_report`` Markdown and never a second fetch.
+
+    Optional and ``None`` on any run where no market-data tool fetched
+    exactly ``analysis_date`` this way -- e.g. the market analyst was not
+    selected, or the analyst never called ``get_verified_market_snapshot``
+    (the one tool path this is captured from; see the module docstring for
+    why the gap-filling indicator path is deliberately excluded). Never
+    reconstructed when absent.
+    """
+
+    provider: str
+    price_mode: str
+    symbol: str
+    requested_analysis_date: str
+    reference_bar_date: str | None = None
+    reference_bar_matches_requested_date: bool | None = None
+    reference_bar: ReferenceBar | None = None
+    # Hash over every bar of the exact dataset that fed the Market Analyst's
+    # verified snapshot (not just reference_bar) -- see
+    # tradingagents.dataflows.price_basis.compute_dataset_fingerprint for the
+    # precise dataset boundary and why values are NOT rounded before
+    # hashing (rounding would hide a genuine Yahoo re-adjustment).
+    dataset_fingerprint: str
+    # The real instant the vendor was last contacted for this exact cached
+    # dataset -- never a stand-in for "whenever this run happened to read
+    # it" (see tradingagents.dataflows.price_basis.PriceBasisEntry).
+    fetched_at: str | None = None
+
+
 class RecommendationRecord(BaseModel):
     schema_version: str = SCHEMA_VERSION
     recommendation_id: str
@@ -335,6 +384,10 @@ class RecommendationRecord(BaseModel):
     evidence: EvidenceRef
     artifacts: ArtifactsRef
     portfolio_context: dict[str, Any] | None = None
+    # Added in schema 1.1 (see SCHEMA_VERSION); absent entirely from older
+    # 1.0 records on disk, which still validate -- Pydantic treats a missing
+    # key for an Optional field with a default as simply unset, not an error.
+    price_basis: PriceBasisSnapshot | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +582,27 @@ def build_recommendation_record(
         ticker=ticker, analysis_date=analysis_date, run_provenance=run_provenance
     )
 
+    # None on any run where no market-data tool captured a structured
+    # reference for exactly this analysis_date (see
+    # tradingagents.dataflows.price_basis) -- never reconstructed from
+    # market_report Markdown or any other fallback.
+    raw_price_basis = result.get("price_basis")
+    price_basis = (
+        PriceBasisSnapshot.model_validate(raw_price_basis) if raw_price_basis else None
+    )
+    if price_basis is not None and (
+        price_basis.symbol != normalize_symbol(ticker)
+        or price_basis.requested_analysis_date != analysis_date
+    ):
+        # A snapshot for a different symbol/date than THIS record's own run
+        # must never be silently kept -- it would misrepresent what basis
+        # actually grounded this recommendation. In normal operation this
+        # cannot happen (cli.run's execute_analysis looks the snapshot up by
+        # this exact same (symbol, analysis_date) pair before attaching it
+        # to final_state), so this only guards against a future caller
+        # passing a mismatched result dict.
+        price_basis = None
+
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "recommendation_id": str(uuid.uuid4()),
@@ -543,6 +617,7 @@ def build_recommendation_record(
         "evidence": evidence_ref.model_dump(mode="json"),
         "artifacts": artifacts_ref.model_dump(mode="json"),
         "portfolio_context": None,
+        "price_basis": price_basis.model_dump(mode="json") if price_basis is not None else None,
     }
     payload["record_hash"] = compute_record_hash(payload)
     return RecommendationRecord.model_validate(payload)

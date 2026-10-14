@@ -733,14 +733,16 @@ def test_27_final_json_is_serializable(tmp_path):
 
 
 @pytest.mark.unit
-def test_28_schema_version_is_1_0(tmp_path):
+def test_28_schema_version_is_1_1(tmp_path):
+    # Bumped 1.0 -> 1.1 for the optional price_basis block (see
+    # test_price_basis.py); still backward-compatible with 1.0 records.
     execution, result, result_path, report_path = _build(tmp_path)
     record = build_recommendation_record(
         execution=execution, result=result, config={}, result_path="result.json",
         result_sha256=sha256_file(result_path), report_path="complete_report.md",
         report_sha256=sha256_file(report_path),
     )
-    assert record.schema_version == "1.0"
+    assert record.schema_version == "1.1"
 
 
 # --- 29: reruns of the same ticker/date can coexist -------------------------

@@ -30,12 +30,17 @@ from cli.selections import get_user_selections
 from cli.stats_handler import StatsCallbackHandler
 from tradingagents.agents.fallback_log import fallback_count, reset_fallback_count
 from tradingagents.agents.rating import is_review
+from tradingagents.dataflows.price_basis import (
+    PriceBasisCollector,
+    get_price_basis_snapshot,
+    set_active_price_basis_collector,
+)
 from tradingagents.dataflows.source_coverage import (
     SourceCoverageCollector,
     get_source_coverage_snapshot,
     set_active_source_coverage_collector,
 )
-from tradingagents.dataflows.symbols import safe_ticker_component
+from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.default_config import (
     DEFAULT_CONFIG,
     resolve_role_config,
@@ -429,56 +434,71 @@ def execute_analysis(
     # run must not accumulate one ticker's source-coverage entries into the
     # next, same reasoning as _apply_seed_context/_start_llm_trace.
     set_active_source_coverage_collector(SourceCoverageCollector())
-    seed_provider_supported = _apply_seed_context(base_seed=base_seed, ticker=ticker, config=config)
+    set_active_price_basis_collector(PriceBasisCollector())
+    # The graph-stream try/except/finally below already resets the
+    # price_basis collector once it's reached (on both the success and the
+    # PartialExecutionError path). This preamble -- seeding, provenance,
+    # trace setup, graph/state construction, checkpoint resume -- runs
+    # BEFORE that block, so an exception here (e.g. an invalid config
+    # surfacing only once the graph is built) would otherwise leave this
+    # run's collector active into whatever runs next in the same thread
+    # (the next ticker in a batch). Guard this span specifically, matching
+    # the task's own "a run must end clean even on exception" requirement.
+    try:
+        seed_provider_supported = _apply_seed_context(base_seed=base_seed, ticker=ticker, config=config)
 
-    # Computed exactly once per run, regardless of --trace-llm, so git is
-    # never invoked twice and the trace manifest (when active) reuses these
-    # same values instead of recomputing them independently (see
-    # run_provenance.py and _start_llm_trace's own git_info/package_version
-    # params below).
-    run_git_info = _git_info()
-    run_package_version = _package_version()
-    trace_manifest_path = (
-        str(Path(output_dir) / "debug" / "run_manifest.json")
-        if trace_llm and output_dir is not None
-        else None
-    )
-    run_provenance = build_run_provenance(
-        selected_analysts=selected_analysts, config=config,
-        configured_seed=configured_seed, base_seed=base_seed,
-        trace_llm=trace_llm, trace_manifest_path=trace_manifest_path,
-        git_info=run_git_info, package_version=run_package_version,
-    )
+        # Computed exactly once per run, regardless of --trace-llm, so git is
+        # never invoked twice and the trace manifest (when active) reuses these
+        # same values instead of recomputing them independently (see
+        # run_provenance.py and _start_llm_trace's own git_info/package_version
+        # params below).
+        run_git_info = _git_info()
+        run_package_version = _package_version()
+        trace_manifest_path = (
+            str(Path(output_dir) / "debug" / "run_manifest.json")
+            if trace_llm and output_dir is not None
+            else None
+        )
+        run_provenance = build_run_provenance(
+            selected_analysts=selected_analysts, config=config,
+            configured_seed=configured_seed, base_seed=base_seed,
+            trace_llm=trace_llm, trace_manifest_path=trace_manifest_path,
+            git_info=run_git_info, package_version=run_package_version,
+        )
 
-    tracer = _start_llm_trace(
-        trace_llm=trace_llm, output_dir=output_dir, ticker=ticker,
-        analysis_date=analysis_date, selected_analysts=selected_analysts, config=config,
-        configured_seed=configured_seed, base_seed=base_seed,
-        seed_provider_supported=seed_provider_supported,
-        git_info=run_git_info, package_version=run_package_version,
-        prompt_hashes=run_provenance["prompts"]["hashes"],
-    )
-    callbacks = [stats_handler] + ([tracer] if tracer is not None else [])
-    graph = TradingAgentsGraph(
-        selected_analysts,
-        config=config,
-        debug=True,
-        callbacks=callbacks,
-    )
-    started = time.monotonic()
-    init_agent_state = graph.create_run_state(
-        ticker, analysis_date, asset_type, portfolio
-    )
-    args = graph.propagator.get_graph_args(callbacks=[stats_handler])
-    checkpoint_tid = graph.begin_checkpoint(
-        ticker, analysis_date, asset_type, portfolio
-    )
-    if checkpoint_tid is not None:
-        args.setdefault("config", {}).setdefault("configurable", {})[
-            "thread_id"
-        ] = checkpoint_tid
-        if on_checkpoint is not None:
-            on_checkpoint(graph)
+        tracer = _start_llm_trace(
+            trace_llm=trace_llm, output_dir=output_dir, ticker=ticker,
+            analysis_date=analysis_date, selected_analysts=selected_analysts, config=config,
+            configured_seed=configured_seed, base_seed=base_seed,
+            seed_provider_supported=seed_provider_supported,
+            git_info=run_git_info, package_version=run_package_version,
+            prompt_hashes=run_provenance["prompts"]["hashes"],
+        )
+        callbacks = [stats_handler] + ([tracer] if tracer is not None else [])
+        graph = TradingAgentsGraph(
+            selected_analysts,
+            config=config,
+            debug=True,
+            callbacks=callbacks,
+        )
+        started = time.monotonic()
+        init_agent_state = graph.create_run_state(
+            ticker, analysis_date, asset_type, portfolio
+        )
+        args = graph.propagator.get_graph_args(callbacks=[stats_handler])
+        checkpoint_tid = graph.begin_checkpoint(
+            ticker, analysis_date, asset_type, portfolio
+        )
+        if checkpoint_tid is not None:
+            args.setdefault("config", {}).setdefault("configurable", {})[
+                "thread_id"
+            ] = checkpoint_tid
+            if on_checkpoint is not None:
+                on_checkpoint(graph)
+    except Exception:
+        set_active_price_basis_collector(None)
+        set_active_source_coverage_collector(None)
+        raise
 
     trace = []
     stream_error: Exception | None = None
@@ -513,6 +533,12 @@ def execute_analysis(
     # lives in, with no new return field needed on AnalysisExecution.
     final_state["source_coverage"] = get_source_coverage_snapshot()
     set_active_source_coverage_collector(None)
+    # Same canonical symbol load_ohlcv recorded under (it never sees the
+    # user's raw ticker spelling/alias) -- a lookup with the raw ticker would
+    # silently miss and this would read back None even when a reference bar
+    # WAS captured.
+    final_state["price_basis"] = get_price_basis_snapshot(normalize_symbol(ticker), analysis_date)
+    set_active_price_basis_collector(None)
     # Unconditional (built above regardless of trace_llm) -- describes the
     # EXECUTION, not just a successful recommendation, so it is attached to
     # final_state on both the success and the partial/failed path below.

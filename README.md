@@ -409,6 +409,40 @@ most from upstream; the full, detailed list is in
   save/export choice must never decide what enters a future longitudinal
   evaluation.
 
+#### price_basis (schema 1.1)
+
+- Schema bumped `1.0` → `1.1`: an optional `price_basis` block was added,
+  recording the exact OHLCV basis the Market Analyst saw for the run's own
+  `analysis_date`. **Backward-compatible** — a `1.0` record on disk simply
+  lacks the key, which still validates and still verifies
+  (`verify_recommendation_record` hashes whatever raw keys a record file
+  has; a `1.0` record is never migrated or rewritten).
+
+- `price_basis` is captured structurally, at the one point every
+  yfinance-backed OHLCV path already shares
+  (`load_ohlcv`, only its `fill_gaps=False` call — the "as the vendor
+  reported it" read used by `get_verified_market_snapshot`) — never parsed
+  from the rendered `market_report` Markdown, and never a second fetch. It
+  includes the provider, an explicit `price_mode` (`YAHOO_AUTO_ADJUSTED` —
+  named explicitly rather than left as an implicit vendor default),
+  symbol, the requested `analysis_date`, the actual reference bar's own
+  date and OHLCV (nullable, and distinct from the requested date so a
+  weekend/holiday fallback is explicit, never a silent substitution), and a
+  deterministic `dataset_fingerprint` over the bars actually used.
+
+- `price_basis` is `null` on any run where no market-data tool captured a
+  structured reference for exactly that date (e.g. the market analyst
+  wasn't selected) — never reconstructed. It is part of the record's
+  immutable content, so it naturally enters `record_hash` like every other
+  field.
+
+- This makes a **future** `RecommendationOutcome` able to detect when
+  Yahoo's auto-adjusted history was retroactively rescaled by a later
+  corporate action (split/dividend) between the recommendation and any
+  later price check — **this does not resolve corporate actions
+  automatically**; it only makes the basis a later check compares against
+  auditable.
+
 ### Non-interactive and batch CLI execution
 
 - Added non-interactive CLI execution so TradingAgents can be run from scripts

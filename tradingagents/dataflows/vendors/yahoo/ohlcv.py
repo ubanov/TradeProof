@@ -10,6 +10,10 @@ from yfinance.exceptions import YFRateLimitError
 from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.errors import NoMarketDataError, VendorRateLimitError
 from tradingagents.dataflows.net import vendor_reachable
+from tradingagents.dataflows.price_basis import (
+    PRICE_MODE_YAHOO_AUTO_ADJUSTED,
+    record_price_basis_reference,
+)
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 
 logger = logging.getLogger(__name__)
@@ -292,6 +296,37 @@ def load_ohlcv(symbol: str, curr_date: str, fill_gaps: bool = True) -> pd.DataFr
     # Reject a stale frame (latest row far older than curr_date) rather than
     # feeding year-old prices into indicators (#1021).
     _assert_ohlcv_not_stale(data, curr_date, symbol, canonical)
+
+    # Price-basis capture: only the "as the vendor reported it" read
+    # (fill_gaps=False, used by get_verified_market_snapshot) is trustworthy
+    # enough to record as a reference bar -- the fill_gaps=True path can
+    # carry a prior session's close forward under this date's row, which
+    # would misrepresent a filled cell as a genuine one (see
+    # tradingagents.dataflows.price_basis module docstring). No second
+    # fetch: this records the exact ``data`` already computed above.
+    if not fill_gaps:
+        # The real instant Yahoo was last contacted to produce the per-symbol
+        # cache file this read came from -- its own mtime, set the moment it
+        # was written after a successful download (see the os.replace()
+        # above). Honest in BOTH branches: on a fresh download this file was
+        # just written; on a cache hit it was written by some earlier call
+        # (this run, or an earlier one the same calendar day -- see
+        # _cache_is_fresh) that genuinely did contact the vendor. Never
+        # datetime.now() standing in for an unknown fetch time -- if the file
+        # is missing by this point (a pathological race with a concurrent
+        # writer), fetched_at is None rather than a fabricated instant.
+        fetched_at = (
+            pd.Timestamp.fromtimestamp(os.path.getmtime(data_file), tz="UTC").isoformat()
+            if os.path.exists(data_file) else None
+        )
+        record_price_basis_reference(
+            provider="yfinance", price_mode=PRICE_MODE_YAHOO_AUTO_ADJUSTED,
+            # Normalized to the same "YYYY-MM-DD" shape as reference_bar_date,
+            # so get_price_basis_snapshot's equality check against
+            # analysis_date is never defeated by incidental string formatting.
+            symbol=canonical, requested_date=curr_date_dt.strftime("%Y-%m-%d"),
+            data=data, fetched_at=fetched_at,
+        )
 
     return data
 

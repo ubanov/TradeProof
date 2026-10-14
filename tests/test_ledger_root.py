@@ -235,6 +235,9 @@ def test_15_schema_fields_unchanged():
         "schema_version", "recommendation_id", "created_at", "record_hash",
         "run_fingerprint", "run", "models", "decision", "trade_plan",
         "horizon", "research", "evidence", "artifacts", "portfolio_context",
+        # Added in schema 1.1 (see tradingagents.recommendation_record):
+        # optional, backward-compatible with 1.0 records lacking this key.
+        "price_basis",
     }
 
 
