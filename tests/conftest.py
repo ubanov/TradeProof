@@ -133,6 +133,37 @@ def _isolate_ledger_root(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_results_dir(tmp_path, monkeypatch):
+    """Redirect the default ``results_dir`` (``~/.tradingagents/logs`` by
+    default) into ``tmp_path``.
+
+    ``cli/run.py::automatic_run_dir`` -- used whenever a CLI invocation
+    omits ``--output-dir`` -- ATOMICALLY CREATES the directory it returns
+    (fixing a real race between concurrent invocations; see its own
+    docstring), rather than just computing a path string. Without this
+    isolation, any test that exercises that no-explicit-``--output-dir``
+    path (e.g. driving ``tradingagents run`` through typer's ``CliRunner``
+    with a mocked ``run_single_analysis``) would create real, empty run
+    directories under the contributor's actual home directory on every
+    test session -- confirmed by a real run of
+    ``test_cli_run_defaults.py`` creating exactly such directories under
+    ``~/.tradingagents/logs/LLY/...`` before this fixture existed.
+
+    Same reload-staleness reasoning as ``_isolate_ledger_root`` above:
+    setitem's both ``tradingagents.default_config``'s own ``DEFAULT_CONFIG``
+    and ``cli.run``'s directly-imported reference (ordinarily the same dict
+    object, but a module that reloads ``tradingagents.default_config``
+    would otherwise silently stop seeing this override through one of them).
+    """
+    import cli.run as cli_run
+    import tradingagents.default_config as default_config_module
+
+    fallback = str(Path(tmp_path) / "results")
+    monkeypatch.setitem(default_config_module.DEFAULT_CONFIG, "results_dir", fallback)
+    monkeypatch.setitem(cli_run.DEFAULT_CONFIG, "results_dir", fallback)
+
+
+@pytest.fixture(autouse=True)
 def _reset_run_scoped_contextvars():
     """Reset the tracer/seed/source-coverage contextvars before and after
     every test.

@@ -200,15 +200,43 @@ def _run_directory(config: dict, ticker: str, trade_date: str) -> Path:
 
 
 def automatic_run_dir(results_dir: Path) -> Path:
-    """A fresh, unique canonical-artifacts directory under ``results_dir``
-    (see ``_run_directory``), shared by the interactive flow and
-    ``tradingagents run`` when ``--output-dir`` is omitted (see
-    ``cli/main.py::run_non_interactive``) -- the microsecond timestamp means
-    two runs of the same ticker/date never overwrite each other's
-    result.json/complete_report.md. Never duplicated: both callers go
+    """A fresh, unique, ALREADY-CREATED canonical-artifacts directory under
+    ``results_dir`` (see ``_run_directory``), shared by the interactive flow
+    and ``tradingagents run`` when ``--output-dir`` is omitted (see
+    ``cli/main.py::run_non_interactive``). Never duplicated: both callers go
     through this one function.
+
+    Reserves the directory ATOMICALLY at call time (``mkdir(exist_ok=False)``,
+    which the OS guarantees is a single, indivisible check-and-create on
+    both POSIX and Windows) -- it deliberately does not just compute a path
+    string for someone else to ``mkdir`` later. Computing now, creating
+    later would leave a real race: two CLI invocations issued close enough
+    together can read the identical microsecond timestamp from the clock,
+    and neither would see the other's not-yet-created directory; a later
+    ``mkdir(parents=True, exist_ok=True)`` deep inside ``write_report_tree``
+    would then silently accept BOTH runs writing into the same directory,
+    each overwriting the other's result.json/complete_report.md (the real
+    failure mode behind a real_run_defaults test that could fail even in
+    isolation).
+
+    On a collision (the bare timestamp slot is already taken -- by another
+    process, or by a same-process call landing on an identical microsecond),
+    retries with ``_01``, ``_02``, ... until an atomic ``mkdir`` succeeds.
+    Never sleeps, never depends on the clock advancing, never overwrites an
+    existing run's directory, and needs no shared/global counter -- the
+    filesystem's own atomic directory creation is the only synchronization.
     """
-    return Path(results_dir) / "runs" / datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    base = Path(results_dir) / "runs"
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    candidate = base / timestamp
+    suffix = 0
+    while True:
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            suffix += 1
+            candidate = base / f"{timestamp}_{suffix:02d}"
 
 
 def _announce_checkpoint_state(graph, ticker: str, trade_date: str) -> None:
