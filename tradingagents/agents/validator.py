@@ -40,6 +40,7 @@ from pydantic import BaseModel, ValidationError
 
 from tradingagents.agents.fallback_log import warn_fallback
 from tradingagents.agents.integrity_shared import split_sentences
+from tradingagents.agents.structured_recovery import recover_structured_from_text
 from tradingagents.agents.validation_schemas import (
     ValidationCategory,
     ValidationFinding,
@@ -735,6 +736,21 @@ def validate_and_repair(
                 repaired_parsed = expected_schema.model_validate(json.loads(_normalize_dollar_escape(repaired_text)))
             except (ValidationError, ValueError, json.JSONDecodeError):
                 repaired_parsed = None
+        if repaired_parsed is None:
+            # The repair call returned free text, not expected_schema's own
+            # JSON shape -- try canonical recovery (same architecture as
+            # researchers/canonical_recovery.py, generalized to an
+            # arbitrary schema; see structured_recovery.py) before giving
+            # up on a structured object entirely. A response that goes on
+            # to PASS/WARN on the recheck below must not still leave
+            # final_parsed stuck at None just because THIS repair happened
+            # to come back as prose (real-run regression: Research
+            # Manager/Portfolio Manager repairs both did, and
+            # research_plan_structured/portfolio_decision_structured ended
+            # up null even though the repaired text was accepted).
+            repaired_parsed = recover_structured_from_text(
+                repaired_text, expected_schema, original_llm, stage, llm_role=original_role,
+            )
 
     final_text = render_fn(repaired_parsed) if (repaired_parsed is not None and render_fn is not None) else repaired_text
 

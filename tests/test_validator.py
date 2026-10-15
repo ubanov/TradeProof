@@ -1222,8 +1222,12 @@ def test_trader_relational_error_with_validation_enabled_triggers_a_repair():
     bad_text = "**Action**: Buy\nThe current price of 216.48 is below the prior resistance of 199.81."
     llm = _TraderLLM(bad_text)
     result = create_trader(llm, validator_llm=_enabled_validator())(_trader_state())
-    # One call for the original free-text generation, one for the repair.
-    assert llm.calls == 2
+    # Original free-text generation, the repair, and -- since the repair's
+    # own free text (this fake returns the same text for every call) still
+    # isn't valid TraderProposal JSON -- one canonical-recovery attempt
+    # (see structured_recovery.py), which also fails to parse it and
+    # leaves final_parsed None exactly as before this mechanism existed.
+    assert llm.calls == 3
     assert result["validation_log"][0]["repair_attempted"] is True
 
 
@@ -1499,7 +1503,10 @@ def test_rm_3_structured_fail_triggers_exactly_one_repair():
     llm = _ResearchManagerLLM(bad_plan)
     validator = _enabled_validator()
     result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
-    assert llm.calls == 2  # original generation + one repair
+    # original generation + one repair + one canonical-recovery attempt
+    # (the repair's own free text, _ResearchManagerLLM's fixed response,
+    # still isn't valid ResearchPlan JSON -- see structured_recovery.py).
+    assert llm.calls == 3
     assert result["validation_log"][0]["repair_attempted"] is True
 
 
@@ -1509,7 +1516,9 @@ def test_rm_4_limited_recovery_fail_triggers_exactly_one_repair_no_normalization
     validator = _FakeStructuredParseFailure(raw)
     llm = _ResearchManagerLLM(_RM_PLAN_TEXT)
     result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
-    assert llm.calls == 2  # original generation + one repair
+    # original generation + one repair + one canonical-recovery attempt
+    # (_RM_PLAN_TEXT is Markdown, not valid ResearchPlan JSON either).
+    assert llm.calls == 3
     assert validator.plain_calls == 0  # recovered mechanically both times, no normalize call
     assert result["validation_log"][0]["repair_attempted"] is True
 
@@ -1571,7 +1580,10 @@ def test_rm_7_repair_fail_no_second_repair_and_final_unresolved_increments():
     llm = _ResearchManagerLLM(bad_plan)  # always returns the same unsupported-threshold text
     validator = _enabled_validator()
     result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
-    assert llm.calls == 2  # original + exactly one repair, never a second
+    # original + exactly one repair + one canonical-recovery attempt
+    # (still never a SECOND repair -- recovery is bookkeeping over the
+    # repair's own text, not another correction pass).
+    assert llm.calls == 3
     entry = result["validation_log"][0]
     assert entry["repair_attempted"] is True
     assert entry["repair_succeeded"] is False
@@ -1707,7 +1719,9 @@ def test_rm_19_generation_role_used_for_research_manager_own_call_and_repair():
 
     llm = _RoleTrackingLLM()
     create_research_manager(llm, validator_llm=_enabled_validator())(_research_manager_state())
-    assert llm.seen_roles == ["generation", "generation"]  # original call + repair, never "validator"
+    # original call + repair + canonical-recovery attempt, all "generation" --
+    # recovery reuses the SAME role as the call it recovers, never "validator".
+    assert llm.seen_roles == ["generation", "generation", "generation"]
 
 
 @pytest.mark.unit
@@ -1729,7 +1743,11 @@ def test_rm_20_validation_and_repair_call_identities_are_distinguishable():
 
     llm = _IdentityTrackingLLM()
     create_research_manager(llm, validator_llm=_enabled_validator())(_research_manager_state())
-    assert llm.seen_identities == ["research_manager", "research_manager_validation_repair"]
+    # The canonical-recovery attempt's call_identity is None -- same
+    # precedent as researchers/canonical_recovery.py's own recovery calls,
+    # which also omit it (the "canonical_recovery" attempt tag alone is
+    # unambiguous; there is only ever one such call per repair).
+    assert llm.seen_identities == ["research_manager", "research_manager_validation_repair", None]
 
 
 # --- 21-23: new observability metrics ---------------------------------------
@@ -2585,7 +2603,11 @@ def test_ideal_regression_missing_ticker_is_the_real_initial_fail_not_the_false_
     assert entry["initial_status"] == ValidationStatus.FAIL.value
     assert "UNIT_ERROR" not in entry["categories"]  # the false positive is gone
     assert entry["repair_attempted"] is True
-    assert llm.calls == 2  # original + exactly one repair, spent on the real problem
+    # original + exactly one repair (spent on the real problem) + one
+    # canonical-recovery attempt, since repaired_text is still Markdown,
+    # not valid TraderProposal JSON -- recovery also fails to parse it,
+    # leaving final_parsed None exactly as before this mechanism existed.
+    assert llm.calls == 3
     assert "LLY" in result["trader_investment_plan"]
     assert entry["status"] == ValidationStatus.PASS.value  # recheck PASS
 
