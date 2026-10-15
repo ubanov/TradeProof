@@ -32,6 +32,7 @@ from tradingagents.agents.integrity_shared import (
     SIZING_WORDS,
     THRESHOLD_TRIGGERS,
     excerpt,
+    exclude_values_still_active,
     extract_numbers,
     find_arithmetic_errors,
     find_numbers_near_triggers,
@@ -209,7 +210,7 @@ def check_risk_integrity(text: str, state: dict) -> RiskIntegrityResult:
     text = text or ""
     pool = build_frozen_evidence_pool(state)
     debate = state.get("investment_debate_state") or {}
-    withdrawn = list(debate.get("withdrawn_values") or [])
+    withdrawn = exclude_values_still_active(list(debate.get("withdrawn_values") or []), pool)
 
     findings: list[RiskFinding] = []
     findings += _find_unsupported_thresholds(text, pool)

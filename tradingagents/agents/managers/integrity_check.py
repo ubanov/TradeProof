@@ -36,6 +36,7 @@ from tradingagents.agents.integrity_shared import (
     SIZING_WORDS,
     THRESHOLD_TRIGGERS,
     excerpt,
+    exclude_values_still_active,
     extract_corrected_away_numbers,
     extract_numbers,
     find_arithmetic_errors,
@@ -238,8 +239,11 @@ def check_manager_integrity(
     """
     text = manager_output_text or ""
     pool = build_known_number_pool(debate, *reports, extra_sources=extra_sources)
-    withdrawn = list(debate.get("withdrawn_values") or []) + extract_corrected_away_numbers(
-        (debate.get("review_outcomes") or "").split("\n")
+    withdrawn = exclude_values_still_active(
+        list(debate.get("withdrawn_values") or []) + extract_corrected_away_numbers(
+            (debate.get("review_outcomes") or "").split("\n")
+        ),
+        pool,
     )
 
     findings: list[ManagerFinding] = []

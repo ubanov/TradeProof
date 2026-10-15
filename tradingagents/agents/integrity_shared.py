@@ -317,6 +317,12 @@ def find_withdrawn_values_reused(text: str, withdrawn_values: list[float]) -> li
     intentionally near-exact (see ``_WITHDRAWN_MATCH_TOLERANCE``): a nearby but
     distinct canonical replacement value must not be flagged merely because it
     is close to the retired one.
+
+    ``withdrawn_values`` is expected to have already been filtered through
+    ``exclude_values_still_active`` by the caller -- this function has no
+    way to tell "217.23 was Bear's own superseded take-profit" apart from
+    "217.23 is Bull's current, never-retired stop-loss" on its own; it only
+    sees a bare float.
     """
     if not withdrawn_values:
         return []
@@ -327,6 +333,31 @@ def find_withdrawn_values_reused(text: str, withdrawn_values: list[float]) -> li
             if any(abs(n - withdrawn) <= _WITHDRAWN_MATCH_TOLERANCE for n in numbers):
                 findings.append(f"{excerpt(sentence)} (value {withdrawn} was withdrawn/corrected earlier)")
     return findings
+
+
+def exclude_values_still_active(withdrawn_values: list[float], active_pool: list[float]) -> list[float]:
+    """Drop a "withdrawn" value that is ALSO currently, independently
+    active in ``active_pool`` (e.g. ``build_known_number_pool``'s bull/bear
+    CURRENT stop_loss/take_profit/entry) -- retiring one side's own stale
+    CLAIM about a number must never blacklist the NUMBER itself for every
+    other, unrelated, still-valid use (real-run regression: Bear's own
+    superseded take-profit of 217.23 correctly retired when Bear revised
+    its target to 222.84, but 217.23 is ALSO, completely independently,
+    Bull's own current, never-retired, verified stop-loss (the real SMA50
+    level) -- flagging every mention of 217.23 anywhere in Risk's text as
+    WITHDRAWN_VALUE_REUSED, including Bull's own unchanged, still-active
+    plan, was not a reused stale value, it was a different side's live
+    evidence that happens to share the same real-world price level).
+
+    Distinguishes: retiring a VALUE ("withdraw stop 217.23" with nothing
+    else currently vouching for 217.23) still blocks reuse of 217.23, as
+    intended. Retiring an INTERPRETATION or a stale CLAIM about a number
+    that remains independently active elsewhere does not retire the number
+    itself.
+    """
+    if not withdrawn_values or not active_pool:
+        return list(withdrawn_values)
+    return [value for value in withdrawn_values if not numbers_match(value, active_pool)]
 
 
 # ---------------------------------------------------------------------------
