@@ -63,10 +63,31 @@ def coverage_gap(
 
 
 def _parse(date: str | None) -> datetime | None:
-    try:
-        return datetime.strptime(date, "%Y-%m-%d")
-    except (TypeError, ValueError):
+    """Parse a YYYY-MM-DD date, tolerating only incidental surrounding
+    whitespace -- the one corruption actually observed from a tool-calling
+    model's own argument text (a real run crashed on a Market Analyst
+    ``get_stock_data`` call whose date argument carried a trailing
+    newline). No other deviation from YYYY-MM-DD is tolerated or guessed
+    at: anything else still returns None exactly as before.
+    """
+    if not isinstance(date, str):
         return None
+    try:
+        return datetime.strptime(date.strip(), "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _canonical(date: str | None) -> str | None:
+    """``date`` with incidental surrounding whitespace stripped when it
+    parses as YYYY-MM-DD once stripped (see ``_parse``) -- returned
+    UNCHANGED otherwise (not a string, or still unparseable), so a
+    genuinely malformed date is never silently rewritten, only the exact
+    corruption this fix targets.
+    """
+    if not isinstance(date, str):
+        return date
+    return date.strip() if _parse(date) is not None else date
 
 
 def as_of(requested: str | None, trade_date: str) -> str | None:
@@ -75,7 +96,14 @@ def as_of(requested: str | None, trade_date: str) -> str | None:
     A model can omit the date or pass today's instead of the analysis date, which
     would walk past every point-in-time guard behind the tool. An empty
     ``trade_date`` (a direct call outside a graph run) passes the request through.
+
+    ``requested`` is canonicalized (incidental surrounding whitespace
+    stripped) before anything else, so a tool call's date argument reaches
+    every vendor already in the one form TradeProof actually uses --
+    never a second, more permissive parser downstream, and never a date
+    this function didn't already validate itself (see ``_canonical``).
     """
+    requested = _canonical(requested)
     if not trade_date:
         return requested
     parsed = _parse(requested)
@@ -86,7 +114,14 @@ def as_of_window(start_date: str, end_date: str, trade_date: str) -> tuple[str, 
     """``[start, end]`` with its end clamped to the run date.
 
     A window wholly after the run date keeps its length and moves back to end there.
+
+    ``start_date``/``end_date`` are canonicalized up front (see ``as_of``'s
+    own docstring) -- every value this function can return is already the
+    stripped, canonical form, never the raw (possibly whitespace-corrupted)
+    argument text.
     """
+    start_date = _canonical(start_date)
+    end_date = _canonical(end_date)
     end = as_of(end_date, trade_date)
     start, old_end = _parse(start_date), _parse(end_date)
     if end == end_date or start is None or start <= _parse(end):
