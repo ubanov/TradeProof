@@ -22,7 +22,7 @@ import json
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # LLMs sometimes write a placeholder string ("None", "N/A", ...) into an optional
 # numeric field instead of omitting it. Coerce those to None so the structured
@@ -486,6 +486,13 @@ class TradePlanAction(str, Enum):
 
 
 class TradePlanFieldChange(BaseModel):
+    # extra="forbid" -- see ResearchReviewOutcome's own model_config comment:
+    # this and TradePlanChanges are the same contractual object family a
+    # mis-keyed tool call silently defaulted to "nothing changed" for (a
+    # real NVDA/2026-09-30 run: a review LLM emitted a key one level up
+    # that this field is reached through -- see that comment for detail).
+    model_config = ConfigDict(extra="forbid")
+
     action: TradePlanAction = TradePlanAction.KEEP
     old: float | None = None
     new: float | None = None
@@ -501,6 +508,8 @@ class TradePlanFieldChange(BaseModel):
 
 
 class TradePlanChanges(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     entry: TradePlanFieldChange = Field(default_factory=TradePlanFieldChange)
     take_profit: TradePlanFieldChange = Field(default_factory=TradePlanFieldChange)
     stop_loss: TradePlanFieldChange = Field(default_factory=TradePlanFieldChange)
@@ -525,7 +534,32 @@ class ResearchReviewOutcome(BaseModel):
     already present in the initial theses; they must not introduce new
     market facts, sources, targets, thresholds, or catalysts except through
     an explicit, justified ``new_data_exceptions`` entry.
+
+    ``extra="forbid"``: real-run regression (NVDA/2026-09-30) -- a review
+    LLM's tool call used the key ``"trade_plan"`` (a string-encoded JSON
+    blob) instead of the contract's actual ``trade_plan_changes`` (a
+    nested object), with the correct key name already present, unmodified,
+    in the tool schema sent to the model (confirmed from the trace's own
+    ``request.json``; not a prompt or schema wording problem -- the model
+    deviated from a correct contract). Pydantic's default ``extra="ignore"``
+    silently dropped the unrecognized ``"trade_plan"`` key AND silently
+    defaulted the real ``trade_plan_changes`` field to "nothing changed"
+    (it has a ``default_factory``) -- validation reported total success,
+    and a genuine KEEP/REVISE/WITHDRAW this researcher stated was lost with
+    no error, no warning, nothing to recover from. Forbidding extra fields
+    turns that same deviation into a validation failure, which
+    ``thesis_flow.invoke_review`` already catches (``except Exception``)
+    and routes through its EXISTING fallback -> canonical-recovery path
+    (``canonical_recovery.recover_review_patch``) -- the researcher's real
+    intent gets one more, auditable chance to become canonical state,
+    rather than being silently treated as complete when it wasn't. No new
+    alias/translation from ``trade_plan`` to ``trade_plan_changes`` was
+    added: that would paper over a model deviation from a contract that was
+    already correct, which the task this comment originates from explicitly
+    ruled out absent further justification.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     accepted: list[str] = Field(default_factory=list)
     rejected: list[str] = Field(default_factory=list)
@@ -650,7 +684,15 @@ class InitialThesisCanonicalPatch(BaseModel):
 class ReviewCanonicalPatch(BaseModel):
     """Minimal recovery contract for a REVIEW fallback: a patch over the
     prior canonical thesis (KEEP/REVISE/WITHDRAW + the new conviction), not a
-    reconstruction of the whole thesis."""
+    reconstruction of the whole thesis.
+
+    ``extra="forbid"`` for the same reason as ``ResearchReviewOutcome``'s own
+    ``trade_plan_changes`` -- this is recovery's own last-resort attempt at
+    the identical contract; it must not ALSO silently default to "nothing
+    changed" on the same kind of mis-keyed response.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     conviction_after: int = Field(ge=0, le=100)
     trade_plan_changes: TradePlanChanges = Field(default_factory=TradePlanChanges)
