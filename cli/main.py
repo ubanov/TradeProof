@@ -25,6 +25,15 @@ from tradingagents.benchmark_replay import (
     run_benchmark,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.evidence_archive import (
+    ERROR as _EVIDENCE_ERROR,
+    NEWS,
+    SOCIAL,
+    parse_evidence_types,
+    parse_providers,
+    run_archive_evidence,
+    summarize as summarize_evidence_captures,
+)
 from tradingagents.portfolio import load_portfolio
 from tradingagents.run_seed import resolve_base_seed, validate_configured_seed
 
@@ -738,6 +747,80 @@ def benchmark_models(
     for model, elapsed in summary.get("elapsed_seconds_total_by_model", {}).items():
         console.print(f"  {_esc(model)}: {format_duration(elapsed)}", emoji=False)
     if failed:
+        raise typer.Exit(code=1)
+
+
+@app.command("archive-evidence")
+def archive_evidence_command(
+    tickers: str | None = typer.Option(
+        None, "--tickers", help="Comma-separated ticker symbols"
+    ),
+    tickers_file: Path | None = typer.Option(  # noqa: B008 - Typer option declaration
+        None, "--tickers-file", help="UTF-8 file with one ticker per line"
+    ),
+    types: str = typer.Option(
+        "news,social", "--types",
+        help="Comma-separated evidence types to capture: news, social.",
+    ),
+    news_providers: str = typer.Option(
+        "yfinance", "--news-providers",
+        help="Comma-separated NEWS providers to capture from: yfinance, alpha_vantage. "
+        "Alpha Vantage's free-tier quota is small -- select it explicitly, never by default.",
+    ),
+    social_providers: str = typer.Option(
+        "stocktwits", "--social-providers",
+        help="Comma-separated SOCIAL providers to capture from: stocktwits, reddit. "
+        "Reddit's per-IP rate limit makes it unsuitable as a default for large "
+        "ticker universes -- select it explicitly.",
+    ),
+    evidence_root: Path | None = typer.Option(  # noqa: B008 - Typer option declaration
+        None, "--evidence-root",
+        help="Override the evidence archive root. Defaults to "
+        "$TRADINGAGENTS_EVIDENCE_ROOT, or ~/.tradingagents/evidence.",
+    ),
+):
+    """Download and preserve point-in-time NEWS/SOCIAL evidence for later
+    inspection/reprocessing.
+
+    Captures are append-only snapshots of what each selected provider
+    returned at the moment of the request -- never an LLM call, never a
+    RecommendationRecord/Outcome, and NOT wired into `tradingagents run`.
+    Each (ticker, evidence type, provider) combination is captured and
+    saved independently; one provider/ticker failure never aborts the rest.
+    """
+    echo = timestamped_echo()
+    try:
+        ticker_names = parse_tickers(tickers, tickers_file)
+        evidence_types = parse_evidence_types(types)
+        selected_news_providers = parse_providers(news_providers, NEWS) if NEWS in evidence_types else None
+        selected_social_providers = parse_providers(social_providers, SOCIAL) if SOCIAL in evidence_types else None
+    except (OSError, ValueError) as exc:
+        echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+    def _on_capture(outcome) -> None:
+        label = f"{outcome.ticker} {outcome.evidence_type.lower()}/{outcome.provider}"
+        if outcome.status == _EVIDENCE_ERROR:
+            echo(f"{label:<28} ERROR              -> {outcome.error_message}")
+        else:
+            echo(f"{label:<28} {outcome.status:<9} {outcome.item_count} item(s) -> {outcome.path}")
+
+    outcomes = run_archive_evidence(
+        ticker_names,
+        evidence_types=evidence_types,
+        news_providers=selected_news_providers,
+        social_providers=selected_social_providers,
+        root=evidence_root,
+        on_capture=_on_capture,
+    )
+
+    summary = summarize_evidence_captures(outcomes)
+    echo(
+        f"Done: {summary['tickers']} ticker(s), {summary['captures']} capture(s) "
+        f"-- {summary['success']} success, {summary['empty']} empty, "
+        f"{summary['unsupported']} unsupported, {summary['error']} error"
+    )
+    if summary["error"]:
         raise typer.Exit(code=1)
 
 

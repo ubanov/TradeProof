@@ -1,0 +1,56 @@
+# EvidenceArchive MASSIVE universe.
+#
+# This is the ticker universe for the MASSIVE profile in
+# scripts/archive-evidence-loop.ps1: frequent point-in-time captures from
+# yfinance (NEWS) + StockTwits (SOCIAL), on the 09:00 / 13:00 / 16:15 ET
+# schedule.
+#
+# Starter list (~30 liquid, high-news/high-chatter US tickers) meant for a
+# few days of debugging before growing to 100+. Edit freely -- one ticker
+# per line, blank lines and lines starting with # are ignored (comments),
+# no duplicates. Avoids index symbols (^...), futures (...=F), and other
+# provider-compatibility edge cases for this first pass.
+
+# Mega tech / internet
+AAPL
+MSFT
+NVDA
+AMZN
+GOOGL
+META
+TSLA
+NFLX
+
+# Semiconductors
+AMD
+AVGO
+QCOM
+MU
+INTC
+
+# Software / cloud
+ORCL
+CRM
+ADBE
+
+# Healthcare / pharma
+LLY
+JNJ
+MRK
+ABBV
+PFE
+
+# Financials
+JPM
+BAC
+GS
+
+# Energy
+XOM
+CVX
+
+# Consumer / industrial
+WMT
+COST
+CAT
+BA

@@ -71,6 +71,24 @@ def _stocktwits_symbol(ticker: str) -> str:
     return f"{base}.X" if base else ticker.strip().upper()
 
 
+def _fetch_raw_messages(ticker: str, timeout: float = 10.0) -> list[dict]:
+    """The one network call behind every StockTwits read: raw message dicts
+    from the symbol stream, unfiltered and untransformed. Shared by
+    ``fetch_stocktwits_messages`` (below) and the evidence archive, so a
+    capture and a live analyst read never issue two network calls for the
+    same data.
+
+    Raises on any transport/parse failure (``OSError``, chunked-transfer
+    errors, invalid JSON) rather than degrading -- callers choose how to
+    report a failure.
+    """
+    url = _API.format(ticker=_stocktwits_symbol(ticker))
+    req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
+    with urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read())
+    return data.get("messages", []) if isinstance(data, dict) else []
+
+
 def fetch_stocktwits_messages(
     ticker: str,
     limit: int = 30,
@@ -94,18 +112,14 @@ def fetch_stocktwits_messages(
     symbol has no messages, or the response shape is unexpected — the
     caller never has to special-case None or exceptions.
     """
-    url = _API.format(ticker=_stocktwits_symbol(ticker))
-    req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
+        fetched = _fetch_raw_messages(ticker, timeout)
     except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         # OSError covers URLError/TimeoutError/connection resets; HTTPException
         # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
         logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
         return f"<stocktwits unavailable: {type(exc).__name__}>"
 
-    fetched = data.get("messages", []) if isinstance(data, dict) else []
     messages = _within_window(fetched, start_date, end_date)
     if not messages:
         if start_date and end_date:

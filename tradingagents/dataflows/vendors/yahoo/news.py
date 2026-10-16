@@ -58,6 +58,16 @@ def _extract_article_data(article: dict) -> dict:
         }
 
 
+def _fetch_raw_news_items(canonical: str, count: int) -> list[dict]:
+    """The one network call behind every yfinance ticker-news read: raw
+    article dicts from ``yf.Ticker(canonical).get_news()``, unfiltered and
+    untransformed. Shared by ``get_news_yfinance`` (below) and the evidence
+    archive, so a capture and a live analyst read never issue two network
+    calls for the same data."""
+    stock = yf.Ticker(canonical)
+    return yf_retry(lambda: stock.get_news(count=count)) or []
+
+
 def get_news_yfinance(
     ticker: str,
     start_date: str,
@@ -81,8 +91,7 @@ def get_news_yfinance(
     canonical = normalize_symbol(ticker)
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
     try:
-        stock = yf.Ticker(canonical)
-        news = yf_retry(lambda: stock.get_news(count=article_limit)) or []
+        news = _fetch_raw_news_items(canonical, article_limit)
 
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
         end_dt = datetime.strptime(end_date, "%Y-%m-%d")

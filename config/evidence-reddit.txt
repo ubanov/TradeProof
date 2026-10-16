@@ -1,0 +1,21 @@
+# EvidenceArchive REDDIT universe.
+#
+# This is the ticker universe for the REDDIT profile in
+# scripts/archive-evidence-loop.ps1: a single daily capture at 16:30 ET.
+#
+# Reddit's anonymous RSS search allows roughly one request per minute per
+# IP, so this subset is intentionally much smaller than evidence-universe.txt
+# and captured far less often. Kept to tickers with heavy retail discussion
+# volume (a subset of the MASSIVE universe). One ticker per line, blank
+# lines and lines starting with # are ignored (comments), no duplicates.
+
+NVDA
+MSFT
+AAPL
+TSLA
+AMD
+META
+AMZN
+GOOGL
+LLY
+NFLX

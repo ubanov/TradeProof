@@ -73,7 +73,7 @@ def parse_tickers(value: str | None, tickers_file: Path | None = None) -> list[s
         raw.extend(
             line.strip()
             for line in tickers_file.read_text(encoding="utf-8").splitlines()
-            if line.strip()
+            if line.strip() and not line.strip().startswith("#")
         )
     if not raw:
         raise ValueError("provide at least one ticker with --tickers or --tickers-file")
