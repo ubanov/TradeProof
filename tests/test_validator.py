@@ -26,6 +26,7 @@ from tradingagents.agents.schemas import (
     TraderAction,
     TraderProposal,
 )
+from tradingagents.agents.structured_recovery import STRUCTURED_RECOVERY_PROMPT_MARKER
 from tradingagents.agents.trader.trader import _trader_deterministic_checks, create_trader
 from tradingagents.agents.validation_schemas import (
     ValidationCategory,
@@ -1489,8 +1490,85 @@ def test_rm_2_validation_enabled_pass_triggers_no_repair():
     llm = _ResearchManagerLLM(_RM_PLAN_TEXT)
     validator = _enabled_validator()
     result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
-    assert llm.calls == 1
+    # Generation call (fallback, _ResearchManagerLLM has no structured
+    # output) + exactly one canonical-recovery attempt: candidate_parsed is
+    # None on arrival (PASS never triggers a repair, so nothing upstream of
+    # this fixes it) and the Validator accepted this text as PASS, so one
+    # bounded recovery attempt is now expected here too (see real-run
+    # regression, 2026-10-16: validate_and_repair's early-return branch
+    # used to return final_parsed=None unconditionally, never attempting
+    # recovery, whenever there was no repair cycle). _RM_PLAN_TEXT is
+    # Markdown, not valid ResearchPlan JSON, so the attempt still fails
+    # safely and research_plan_structured stays None -- never fabricated.
+    assert llm.calls == 2
     assert result["validation_log"][0]["repair_attempted"] is False
+    assert result["research_plan_structured"] is None
+
+
+class _StructuredMissLLM:
+    """Reproduces the exact real-run shape (NVDA, 2026-10-16): the structured
+    attempt answers WITHOUT a tool call (``invoke_structured_or_freetext``
+    then raises internally and falls back), the free-text fallback is
+    accepted as PASS, and canonical recovery (over that SAME accepted text)
+    either succeeds or fails depending on ``recovery_response``."""
+
+    class _StructuredMiss:
+        def invoke(self, prompt, **kwargs):
+            return None  # "no tool call" -- a thinking model answering in plain text
+
+    def __init__(self, fallback_text: str, recovery_response: str | None = None):
+        self.fallback_text = fallback_text
+        self.recovery_response = recovery_response
+        self.calls = 0
+
+    def with_structured_output(self, schema, **kwargs):
+        return self._StructuredMiss()
+
+    def invoke(self, prompt, **kwargs):
+        self.calls += 1
+        if STRUCTURED_RECOVERY_PROMPT_MARKER in prompt:
+            return SimpleNamespace(content=self.recovery_response or "not valid json")
+        return SimpleNamespace(content=self.fallback_text)
+
+
+_RECOVERABLE_PLAN_JSON = (
+    '{"recommendation": "Buy", "rationale": "Bull case is stronger.", '
+    '"strategic_actions": "Enter per plan."}'
+)
+
+
+@pytest.mark.unit
+def test_rm_24_structured_miss_fallback_pass_recovers_to_research_plan():
+    """The real-run regression, reproduced exactly: ResearchPlan structured
+    attempt -> no tool call -> fallback Markdown -> validator PASS -> direct
+    JSON parse of that Markdown fails (it is not JSON at all) -> canonical
+    recovery against the SAME accepted text succeeds -> final_parsed IS a
+    ResearchPlan, never left null just because the path never saw a repair."""
+    llm = _StructuredMissLLM(_RM_PLAN_TEXT, recovery_response=_RECOVERABLE_PLAN_JSON)
+    validator = _enabled_validator()
+    result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
+    assert result["validation_log"][0]["status"] == ValidationStatus.PASS.value
+    assert result["validation_log"][0]["repair_attempted"] is False
+    assert result["research_plan_structured"] is not None
+    assert result["research_plan_structured"]["recommendation"] == "Buy"
+    # Generation's own structured miss + fallback (both inside
+    # invoke_structured_or_freetext_parsed) + exactly one recovery call.
+    assert llm.calls == 2
+
+
+@pytest.mark.unit
+def test_rm_25_structured_miss_fallback_pass_recovery_fails_stays_none():
+    """Same path as test_rm_24, but the recovery call itself cannot produce
+    valid ResearchPlan JSON -- final_parsed must stay None exactly as
+    before, never fabricated, and the run must not break (investment_plan
+    text and the PASS status still come through)."""
+    llm = _StructuredMissLLM(_RM_PLAN_TEXT, recovery_response="not valid json")
+    validator = _enabled_validator()
+    result = create_research_manager(llm, validator_llm=validator)(_research_manager_state())
+    assert result["validation_log"][0]["status"] == ValidationStatus.PASS.value
+    assert result["research_plan_structured"] is None
+    assert result["investment_plan"] == _RM_PLAN_TEXT
+    assert llm.calls == 2  # the one bounded recovery attempt, no retry/loop
 
 
 @pytest.mark.unit
@@ -2133,8 +2211,13 @@ def test_real_regression_setup_tags_restatement_does_not_trigger_false_fail_end_
     )
     llm = _ResearchManagerLLM(candidate)
     result = create_research_manager(llm, validator_llm=None)(state)
-    assert llm.calls == 1  # no repair triggered
+    # No repair triggered (status is PASS), but the accepted-PASS text has
+    # no structured object behind it (no with_structured_output here), so
+    # one canonical-recovery attempt now follows -- it fails safely since
+    # `candidate` is Markdown, not valid ResearchPlan JSON.
+    assert llm.calls == 2
     assert result["validation_log"][0]["status"] == ValidationStatus.PASS.value
+    assert result["research_plan_structured"] is None
     assert result["investment_plan"] == candidate  # nothing stripped out
 
 
@@ -2396,8 +2479,14 @@ def test_12_rm_setup_tags_regression_remains_fixed():
     )
     llm = _ResearchManagerLLM(candidate)
     result = create_research_manager(llm, validator_llm=None)(state)
-    assert llm.calls == 1
+    # Generation call + one canonical-recovery attempt: status is PASS (no
+    # deterministic finding here), so the accepted-PASS recovery path now
+    # applies even with validation disabled (see validate_and_repair's
+    # early-return branch) -- it still fails safely since `candidate` is
+    # Markdown, not valid ResearchPlan JSON.
+    assert llm.calls == 2
     assert result["validation_log"][0]["status"] == ValidationStatus.PASS.value
+    assert result["research_plan_structured"] is None
 
 
 @pytest.mark.unit

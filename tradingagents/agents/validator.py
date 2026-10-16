@@ -705,9 +705,33 @@ def validate_and_repair(
         candidate_text=candidate_text, det_findings=det_findings,
     )
     if status != ValidationStatus.FAIL.value or validator_llm is None:
+        final_parsed = candidate_parsed
+        # Recovery applies only to content the system actually ACCEPTS as
+        # PASS/WARN -- never to a FAIL that simply couldn't be repaired
+        # because validation is disabled (validator_llm is None): that text
+        # was never accepted, it is a known, unrepaired FAIL, and recovering
+        # a structured object from it would make a flagged candidate look
+        # as trustworthy as an accepted one.
+        if final_parsed is None and expected_schema is not None and status != ValidationStatus.FAIL.value:
+            # The accepted text never went through a repair cycle -- but the
+            # caller's own initial structured attempt can itself have fallen
+            # back to free text (e.g. the model answered without a tool
+            # call), in which case candidate_parsed was already None on
+            # arrival here, not something THIS function broke. Real-run
+            # regression (2026-10-16, NVDA): Research Manager's structured
+            # attempt produced no tool call, the free-text fallback was
+            # accepted as PASS, and research_plan_structured stayed null
+            # forever -- canonical recovery (commit 8bccba7) only ever ran
+            # inside the repair branch below, never on this earlier, more
+            # common path. One bounded attempt, same mechanism the repair
+            # branch already uses, never a loop and never re-judging
+            # PASS/WARN/FAIL.
+            final_parsed = recover_structured_from_text(
+                candidate_text, expected_schema, original_llm, stage, llm_role=original_role,
+            )
         return ValidationOutcome(
             status=status, findings=findings, final_text=candidate_text,
-            final_parsed=candidate_parsed, llm_calls=llm_calls, initial_status=status,
+            final_parsed=final_parsed, llm_calls=llm_calls, initial_status=status,
         )
 
     # Visible only on FAIL/repair -- never one line per PASS (see fork

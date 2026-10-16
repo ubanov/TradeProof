@@ -253,18 +253,25 @@ def test_text_only_status_is_visible_to_research_manager_and_trader():
     create_research_manager(manager_llm)(state)
     assert "fell back to free text" in manager_llm.prompts[0]
 
-    captured = {}
+    captured = {"prompts": []}
 
     class _PlainTraderLLM:
+        # No with_structured_output -- Trader's own call falls back to free
+        # text, and (since that text then PASSes validation with no
+        # structured object behind it) a second, canonical-recovery call
+        # now follows too (see validate_and_repair's early-return fix,
+        # 2026-10-16) -- capture every call and check the FIRST one, which
+        # is Trader's own real rendered prompt (a message list), never the
+        # recovery call's own plain-string prompt.
         def invoke(self, prompt):
-            captured["prompt"] = prompt
+            captured["prompts"].append(prompt)
             return SimpleNamespace(
                 content="**Action**: Hold\n\nFINAL TRANSACTION PROPOSAL: **HOLD**"
             )
 
     state["investment_plan"] = "Hold plan"
     create_trader(_PlainTraderLLM())(state)
-    user = " ".join(m["content"] for m in captured["prompt"] if m["role"] == "user")
+    user = " ".join(m["content"] for m in captured["prompts"][0] if m["role"] == "user")
     assert "fell back to free text" in user
 
 
@@ -299,15 +306,18 @@ def test_trader_receives_repaired_structured_trade_plan_values():
     _apply(state, create_bull_repair(_StructuredLLM([review])))
     state["investment_plan"] = "Buy plan"
 
-    captured = {}
+    captured = {"prompts": []}
 
     class _PlainTraderLLM:
+        # See the sibling test above: a second, canonical-recovery call now
+        # follows Trader's own fallback -- capture every call and check the
+        # FIRST one (Trader's real rendered prompt).
         def invoke(self, prompt):
-            captured["prompt"] = prompt
+            captured["prompts"].append(prompt)
             return SimpleNamespace(content="**Action**: Buy\n\nFINAL TRANSACTION PROPOSAL: **BUY**")
 
     create_trader(_PlainTraderLLM())(state)
-    user = " ".join(m["content"] for m in captured["prompt"] if m["role"] == "user")
+    user = " ".join(m["content"] for m in captured["prompts"][0] if m["role"] == "user")
     assert "Stop Loss: 79000" in user
 
 
