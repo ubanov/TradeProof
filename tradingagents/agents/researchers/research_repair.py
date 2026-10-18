@@ -25,7 +25,7 @@ from tradingagents.agents.context import (
     report_or_absent,
 )
 from tradingagents.agents.researchers.thesis_flow import (
-    apply_trade_plan_changes,
+    apply_validated_trade_plan_changes,
     invoke_review,
     recompute_trade_metrics,
 )
@@ -110,7 +110,9 @@ def _create_research_repair(review_llm, side: str):
             new_debate[f"{side_key}_repair_structured_status"] = "APPLIED"
             current_thesis = debate.get(f"{side_key}_thesis") or {}
             if current_thesis:
-                updated_thesis, retired = apply_trade_plan_changes(current_thesis, review_dict)
+                updated_thesis, retired, geometry_finding = apply_validated_trade_plan_changes(
+                    current_thesis, review_dict
+                )
                 new_debate[f"{side_key}_thesis"] = updated_thesis
                 new_debate[f"{side_key}_trade_metrics"] = recompute_trade_metrics(
                     updated_thesis, debate.get("atr_reference")
@@ -118,6 +120,20 @@ def _create_research_repair(review_llm, side: str):
                 if retired:
                     new_debate["withdrawn_values"] = (
                         debate.get("withdrawn_values", []) + retired
+                    )
+                if geometry_finding is not None:
+                    # Repair reproduced (or newly introduced) invalid
+                    # geometry -- rejected the same way a normal review
+                    # round's would be, never silently accepted on a second
+                    # attempt (see fork README: "Trade geometry validation").
+                    new_debate["trade_geometry_rejections"] = (
+                        debate.get("trade_geometry_rejections", [])
+                        + [{
+                            "side": side_key,
+                            "round": f"repair_{repair_round}",
+                            "claim": geometry_finding.claim,
+                            "reason": geometry_finding.reason,
+                        }]
                     )
             new_debate[f"{side_key}_conviction_history"] = conviction_history + [
                 review_dict["conviction_after"]

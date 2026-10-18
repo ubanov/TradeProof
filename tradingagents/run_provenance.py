@@ -96,6 +96,12 @@ def build_run_provenance(
             "language": config.get("output_language", "English"),
             "depth": config.get("max_risk_discuss_rounds"),
             "selected_analysts": list(selected_analysts),
+            # Decision Memory mode this run actually used (see fork README:
+            # "Decision memory isolation") -- so a run's provenance always
+            # says, on its own, whether it was stateful with respect to
+            # past/future sessions.
+            "decision_memory_enabled": bool(config.get("decision_memory_enabled", True)),
+            "decision_memory_root": config.get("decision_memory_root"),
         },
         "prompts": {
             "hashes": resolved_prompt_hashes,

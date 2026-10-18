@@ -236,7 +236,11 @@ def test_9_new_records_use_schema_version_1_1(tmp_path):
         result_sha256=sha256_file(result_path), report_path="complete_report.md",
         report_sha256=sha256_file(report_path),
     )
-    assert record.schema_version == "1.1"
+    # Current schema is 1.3 (see tests/test_decision_memory_isolation.py,
+    # tests/test_pre_pm_snapshot.py); this test's own name predates those
+    # bumps and still exercises the 1.1-introduced price_basis block, which
+    # is unaffected by them.
+    assert record.schema_version == "1.3"
 
 
 @pytest.mark.unit

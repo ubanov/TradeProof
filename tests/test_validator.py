@@ -43,7 +43,6 @@ from tradingagents.agents.validator import (
 )
 from tradingagents.agents.validator_deterministic import (
     check_arithmetic_claims,
-    check_entry_stop_direction,
     check_json_syntax,
     check_manager_integrity_findings,
     check_missing_requirement,
@@ -51,6 +50,7 @@ from tradingagents.agents.validator_deterministic import (
     check_relational_errors,
     check_schema,
     check_text_relational_and_unit_errors,
+    check_trade_geometry,
 )
 from tradingagents.default_config import DEFAULT_CONFIG, resolve_validation_config
 from tradingagents.graph.propagation import Propagator
@@ -251,14 +251,18 @@ def test_unit_error_check_flags_a_percentage_used_as_a_level():
 
 @pytest.mark.unit
 def test_entry_stop_direction_flags_a_buy_with_stop_above_entry():
-    finding = check_entry_stop_direction("BUY", entry=100.0, stop_loss=105.0)
+    # Migrated from the retired check_entry_stop_direction (see fork README:
+    # "Trade geometry validation") -- check_trade_geometry supersedes it,
+    # now under its own TRADE_GEOMETRY_ERROR category (see test_trade_
+    # geometry_validation.py for the full suite covering this function).
+    finding = check_trade_geometry("BUY", entry_price=100.0, stop_loss=105.0)
     assert finding is not None
-    assert finding.category == ValidationCategory.RELATIONAL_ERROR
+    assert finding.category == ValidationCategory.TRADE_GEOMETRY_ERROR
 
 
 @pytest.mark.unit
 def test_entry_stop_direction_passes_a_correct_buy():
-    assert check_entry_stop_direction("BUY", entry=100.0, stop_loss=95.0) is None
+    assert check_trade_geometry("BUY", entry_price=100.0, stop_loss=95.0) is None
 
 
 @pytest.mark.unit

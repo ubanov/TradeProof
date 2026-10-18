@@ -37,6 +37,12 @@ class InvestDebateState(TypedDict):
     bull_trade_metrics: Annotated[dict, "Deterministic trade metrics for Bull's current plan"]
     bear_trade_metrics: Annotated[dict, "Deterministic trade metrics for Bear's current plan"]
     new_data_exceptions: Annotated[list[dict], "NEW_DATA_EXCEPTION entries raised during review"]
+    trade_geometry_rejections: Annotated[
+        list[dict],
+        "Review/repair trade-plan changes rejected for violating directional "
+        "geometry (stop/target on the wrong side of entry) -- the prior, "
+        "valid levels were kept instead of consolidating these.",
+    ]
     withdrawn_values: Annotated[
         list[float],
         "Trade-plan levels WITHDRAWN or genuinely REVISED away during review or repair; "
@@ -229,6 +235,16 @@ class AgentState(MessagesState):
     ]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
     portfolio_context: Annotated[str, "Caller-supplied holdings and cash, rendered at run start; empty when not provided"]
+
+    # Set by the Portfolio Manager node's snapshot-writing wrapper (see
+    # pre_pm_snapshot.with_pre_pm_snapshot), never by the node itself --
+    # absent/None when no PrePMSnapshot was written for this run (any
+    # caller that did not supply run_provenance to TradingAgentsGraph, e.g.
+    # backtest/propagate(), the same scoping RecommendationRecord already
+    # has). See fork README: "PrePMSnapshot".
+    pre_pm_snapshot_ref: Annotated[
+        dict | None, "snapshot_id/content_hash/path of the PrePMSnapshot used, or None"
+    ]
 
     # Compact per-stage Validator outcomes (see fork README: "Generation /
     # Validation / Review") -- status/finding-count/repair metadata only,

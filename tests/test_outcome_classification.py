@@ -317,7 +317,11 @@ def test_executable_plan_without_stop_loss_or_take_profit(tmp_path):
 @pytest.mark.unit
 def test_works_on_a_schema_1_1_record_with_price_basis(tmp_path):
     record = _record(tmp_path, action=TraderAction.BUY, disposition=RiskDisposition.KEEP, entry_price=100.0)
-    assert record.schema_version == "1.1"
+    # Current schema, bumped past 1.1 since this test was written (see
+    # tests/test_decision_memory_isolation.py, tests/test_pre_pm_snapshot.py)
+    # -- still exercises the same 1.1-introduced price_basis compatibility
+    # path this test is named for.
+    assert record.schema_version == "1.3"
     assert record.price_basis is None  # no price_basis captured by _build's fixture state
     assert classify_recommendation(record).plan_type is PlanType.EXECUTABLE_TRADE_PLAN
 

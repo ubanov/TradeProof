@@ -112,12 +112,12 @@ def offline(monkeypatch, tmp_path):
     return called
 
 
-def _graph(tmp_path, monkeypatch, model, **config):
+def _graph(tmp_path, monkeypatch, model, run_provenance=None, **config):
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     cfg.update(results_dir=str(tmp_path / "results"), data_cache_dir=str(tmp_path / "cache"),
                memory_log_path=str(tmp_path / "log.md"), **config)
     monkeypatch.setattr(trading_graph, "create_llm_client", lambda **k: _Client(model))
-    return trading_graph.TradingAgentsGraph(config=cfg)
+    return trading_graph.TradingAgentsGraph(config=cfg, run_provenance=run_provenance)
 
 
 @pytest.mark.unit
@@ -137,6 +137,45 @@ def test_a_full_run_reaches_a_logged_decision(tmp_path, monkeypatch, offline, st
                     "get_insider_transactions", "ohlcv"}
     assert offline == tool_methods
     assert [e["rating"] for e in graph.memory_log.load_entries()] == ["Overweight"]
+
+
+@pytest.mark.unit
+def test_a_full_run_writes_a_pre_pm_snapshot_when_run_provenance_is_given(tmp_path, monkeypatch, offline):
+    """The real end-to-end wiring (see fork README: "PrePMSnapshot"): a run
+    through the actual compiled graph, not just the wrapper in isolation."""
+    from tradingagents.run_provenance import build_run_provenance
+
+    provenance = build_run_provenance(
+        selected_analysts=["market", "social", "news", "fundamentals"],
+        config={"decision_memory_enabled": True, "decision_memory_root": None},
+        git_info={"commit": None, "branch": None, "dirty": None},
+        package_version="test", prompt_hashes={},
+    )
+    graph = _graph(
+        tmp_path, monkeypatch, ScriptedModel(), run_provenance=provenance,
+        ledger_root=str(tmp_path / "ledger"),
+    )
+
+    state, signal = graph.propagate("NVDA", TRADE_DATE)
+
+    assert signal == "Overweight"
+    written = list((tmp_path / "ledger" / "pre_pm" / "NVDA").glob("*.json"))
+    assert len(written) == 1
+    ref = state["pre_pm_snapshot_ref"]
+    assert ref["path"] == str(written[0])
+
+
+@pytest.mark.unit
+def test_a_full_run_writes_no_pre_pm_snapshot_without_run_provenance(tmp_path, monkeypatch, offline):
+    """Default behavior is unchanged: a bare propagate() call (no
+    run_provenance, the only kind this whole test module otherwise makes)
+    writes nothing to the ledger."""
+    graph = _graph(tmp_path, monkeypatch, ScriptedModel(), ledger_root=str(tmp_path / "ledger"))
+
+    state, _ = graph.propagate("NVDA", TRADE_DATE)
+
+    assert not (tmp_path / "ledger").exists()
+    assert "pre_pm_snapshot_ref" not in state
 
 
 @pytest.mark.unit

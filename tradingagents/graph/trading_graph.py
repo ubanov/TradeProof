@@ -15,6 +15,7 @@ from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.decision_log import TradingMemoryLog
 from tradingagents.default_config import (
     DEFAULT_CONFIG,
+    resolve_decision_memory_config,
     resolve_role_config,
     resolve_validation_config,
 )
@@ -54,6 +55,7 @@ class TradingAgentsGraph:
         debug=False,
         config: dict[str, Any] = None,
         callbacks: list | None = None,
+        run_provenance: dict[str, Any] | None = None,
     ):
         """Initialize the trading agents graph and components.
 
@@ -62,10 +64,19 @@ class TradingAgentsGraph:
             debug: Whether to run in debug mode
             config: Configuration dictionary. If None, uses default config
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
+            run_provenance: This run's provenance dict (see
+                ``run_provenance.build_run_provenance``), when the caller has
+                already built one (currently only ``cli/run.py::execute_analysis``).
+                When given, a PrePMSnapshot (see fork README: "PrePMSnapshot")
+                is written automatically before the Portfolio Manager runs.
+                ``None`` (the default, for any other caller -- backtest,
+                bare ``propagate()``, a test) writes no snapshot at all,
+                the same scoping RecommendationRecord already has.
         """
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
+        self.run_provenance = run_provenance
 
         set_config(self.config)
 
@@ -84,6 +95,14 @@ class TradingAgentsGraph:
         # / Review"): fails loudly, before any client is constructed, rather
         # than silently falling back to generation_llm.
         self.config = resolve_validation_config(self.config)
+        # Decision Memory isolation (see fork README: "Decision memory
+        # isolation"): resolves decision_memory_enabled/decision_memory_root
+        # into the effective memory_log_path TradingMemoryLog reads below --
+        # the one place this run's memory mode is actually decided, for any
+        # caller (CLI run/batch, interactive, backtest, or a bare config
+        # dict). Raises loudly, before any LLM client is built, if the two
+        # flags conflict.
+        self.config = resolve_decision_memory_config(self.config)
 
         # Built once per role (not shared) so each can carry its own
         # independently configured reasoning effort -- generation_reasoning_
@@ -148,6 +167,17 @@ class TradingAgentsGraph:
             self.review_llm,
             self.conditional_logic,
             validator_llm=self.validator_llm,
+            run_provenance=self.run_provenance,
+            # Same convention as recommendation_record.resolve_ledger_root,
+            # duplicated locally rather than importing the ledger module
+            # here (trading_graph.py/propagate() must stay decoupled from
+            # the ledger/CLI-output layer -- see test_recommendation_record_
+            # persistence.py's "does not import the ledger" tests).
+            ledger_root=(
+                Path(self.config.get("ledger_root") or DEFAULT_CONFIG["ledger_root"])
+                if self.run_provenance is not None else None
+            ),
+            results_dir=self.config.get("results_dir"),
         )
 
         self.propagator = Propagator(

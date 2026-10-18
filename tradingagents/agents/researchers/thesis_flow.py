@@ -29,6 +29,7 @@ from tradingagents.agents.researchers.canonical_recovery import (
 from tradingagents.agents.researchers.trade_metrics import (
     compute_trade_metrics,
     entry_reference as _entry_reference,
+    trade_geometry_violations,
 )
 from tradingagents.agents.schemas import (
     InitialResearchThesis,
@@ -36,6 +37,7 @@ from tradingagents.agents.schemas import (
     render_initial_thesis,
     render_review_outcome,
 )
+from tradingagents.agents.validation_schemas import ValidationCategory, ValidationFinding
 from tradingagents.llm_trace import record_structured_parse_result, traced_invoke
 
 logger = logging.getLogger(__name__)
@@ -264,10 +266,78 @@ def apply_trade_plan_changes(thesis: dict, review: dict) -> tuple[dict, list[flo
     return updated, retired
 
 
+def apply_validated_trade_plan_changes(
+    thesis: dict, review: dict,
+) -> tuple[dict, list[float], ValidationFinding | None]:
+    """Like ``apply_trade_plan_changes``, but never consolidates a candidate
+    whose resulting entry/stop_loss/take_profit would violate this thesis's
+    own stated direction (see fork README: "Trade geometry validation" /
+    NVDA 2026-01-07 regression, where a Bear review mistook the Bull's stop
+    for its own and proposed a stop-loss BELOW entry for a SHORT thesis).
+
+    Used by both a normal cross-review round and repair (see
+    ``researchers/bear_researcher.py``/``bull_researcher.py``/
+    ``research_repair.py``) -- the same guard applies identically to both,
+    so a repair that reproduces the same invalid geometry is rejected again
+    rather than accepted on a second attempt.
+
+    On a violation, ``entry``/``stop_loss``/``take_profit`` revert as a
+    whole to ``thesis``'s own prior values -- the last known
+    geometrically-valid combination -- never a partial mix of old and new
+    fields, which could itself be an untested, possibly-also-invalid
+    combination. Nothing else the review changed (conviction, accepted/
+    rejected evidence, disagreements, ...) is affected. ``retired`` is empty
+    in that case: the prior values remain active, not withdrawn, so a later
+    round citing them is not flagged as reusing a withdrawn value.
+
+    Returns ``(updated_thesis, retired_values, geometry_finding)`` --
+    ``geometry_finding`` is ``None`` exactly when the candidate was valid
+    (including when the thesis has no resolvable direction/entry, in which
+    case nothing is checked at all).
+    """
+    candidate, retired = apply_trade_plan_changes(thesis, review)
+    entry = candidate.get("entry") or {}
+    candidate_entry_ref = _entry_reference(entry.get("price"), entry.get("low"), entry.get("high"))
+    violations = trade_geometry_violations(
+        candidate.get("direction"), candidate_entry_ref,
+        candidate.get("stop_loss"), candidate.get("take_profit"),
+    )
+    if not violations:
+        return candidate, retired, None
+
+    finding = ValidationFinding(
+        category=ValidationCategory.TRADE_GEOMETRY_ERROR,
+        claim="; ".join(violations),
+        evidence=[
+            str(v) for v in (candidate_entry_ref, candidate.get("stop_loss"), candidate.get("take_profit"))
+            if v is not None
+        ],
+        reason=(
+            "The proposed entry/stop-loss/take-profit combination is not on "
+            "the correct side of entry for this thesis's own direction -- "
+            "rejected, not consolidated; the prior, geometrically-valid "
+            "levels are kept."
+        ),
+    )
+    reverted = dict(candidate)
+    reverted["entry"] = dict(thesis.get("entry") or {})
+    reverted["stop_loss"] = thesis.get("stop_loss")
+    reverted["take_profit"] = thesis.get("take_profit")
+    return reverted, [], finding
+
+
 def recompute_trade_metrics(thesis: dict, atr: float | None) -> dict:
-    """Deterministic trade metrics for a tracked thesis dict, as a plain dict."""
+    """Deterministic trade metrics for a tracked thesis dict, as a plain dict.
+
+    ``direction`` is read from ``thesis`` itself and passed through to
+    ``compute_trade_metrics`` so an invalid-geometry thesis (see
+    ``apply_validated_trade_plan_changes``) never gets a plausible-looking
+    risk/reward computed via ``abs()`` for it -- see fork README: "Trade
+    geometry validation".
+    """
     entry = thesis.get("entry") or {}
     metrics = compute_trade_metrics(
+        direction=thesis.get("direction"),
         entry_price=entry.get("price") if entry.get("type") == "point" else None,
         entry_low=entry.get("low") if entry.get("type") == "range" else None,
         entry_high=entry.get("high") if entry.get("type") == "range" else None,
@@ -286,4 +356,5 @@ def recompute_trade_metrics(thesis: dict, atr: float | None) -> dict:
         "target_atr": metrics.target_atr,
         "risk_reward_min": metrics.risk_reward_min,
         "risk_reward_max": metrics.risk_reward_max,
+        "geometry_valid": metrics.geometry_valid,
     }

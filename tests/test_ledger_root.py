@@ -238,6 +238,9 @@ def test_15_schema_fields_unchanged():
         # Added in schema 1.1 (see tradingagents.recommendation_record):
         # optional, backward-compatible with 1.0 records lacking this key.
         "price_basis",
+        # Added in schema 1.3 (see tests/test_pre_pm_snapshot.py): optional,
+        # backward-compatible with records lacking this key.
+        "pre_pm_snapshot",
     }
 
 

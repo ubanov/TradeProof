@@ -26,6 +26,10 @@ from tradingagents.agents.managers.integrity_check import (
     check_manager_integrity,
 )
 from tradingagents.agents.researchers.arithmetic import check_arithmetic
+from tradingagents.agents.researchers.trade_metrics import (
+    entry_reference,
+    trade_geometry_violations,
+)
 from tradingagents.agents.schemas import ArithmeticClaim
 from tradingagents.agents.validation_schemas import ValidationCategory, ValidationFinding
 
@@ -173,26 +177,47 @@ def check_price_field_percentage(text: str) -> list[ValidationFinding]:
     return findings
 
 
-def check_entry_stop_direction(
-    action: str, entry: float | None, stop_loss: float | None,
+def check_trade_geometry(
+    direction: str | None,
+    entry_price: float | None = None,
+    entry_low: float | None = None,
+    entry_high: float | None = None,
+    reference_entry: float | None = None,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
 ) -> ValidationFinding | None:
-    """Buy must risk DOWN (stop below entry); Sell must risk UP (stop above
-    entry) -- a structural direction check on the Trader's own structured
-    fields, not a semantic judgment of the plan itself."""
-    if entry is None or stop_loss is None:
-        return None
-    action = (action or "").upper()
-    if action == "BUY" and stop_loss >= entry:
-        wrong = "at or above"
-    elif action == "SELL" and stop_loss <= entry:
-        wrong = "at or below"
-    else:
+    """A directional plan's stop-loss AND take-profit must each be on the
+    correct side of entry for its own stated direction -- superseding the
+    narrower ``check_entry_stop_direction`` (stop-loss only, point entry
+    only), which this replaces (see fork README / NVDA 2026-01-07
+    regression: a SHORT thesis whose stop-loss ended up below entry instead
+    of above produced a plausible-looking but structurally non-executable
+    plan, undetected because nothing checked direction, only arithmetic).
+
+    ``reference_entry`` (e.g. the Trader's own calculated reference for an
+    entry range) takes precedence when given; otherwise the entry is
+    resolved via ``entry_reference`` exactly like ``trade_metrics.py`` does,
+    covering a single point AND a genuine range identically. A direction
+    that isn't LONG/BUY/BULL or SHORT/SELL/BEAR (Hold, unrecognized, or
+    absent), a missing/unresolvable entry, or a missing stop_loss/
+    take_profit individually all mean nothing is checked for that
+    field -- never invented, never corrected.
+    """
+    entry = reference_entry if reference_entry is not None else entry_reference(
+        entry_price, entry_low, entry_high
+    )
+    violations = trade_geometry_violations(direction, entry, stop_loss, take_profit)
+    if not violations:
         return None
     return ValidationFinding(
-        category=ValidationCategory.RELATIONAL_ERROR,
-        claim=f"{action} with stop_loss={stop_loss} {wrong} entry={entry}",
-        evidence=[str(entry), str(stop_loss)],
-        reason=f"A {action} stop-loss must be on the losing side of entry.",
+        category=ValidationCategory.TRADE_GEOMETRY_ERROR,
+        claim="; ".join(violations),
+        evidence=[str(v) for v in (entry, stop_loss, take_profit) if v is not None],
+        reason=(
+            "A directional plan's stop-loss and take-profit must be on the "
+            "correct side of entry for the trade's direction -- a structural "
+            "execution error, not a minor arithmetic discrepancy."
+        ),
     )
 
 

@@ -38,9 +38,10 @@ class _FakeGraphCore:
 class _FakeTradingAgentsGraph:
     last_instance = None
 
-    def __init__(self, selected_analysts, config=None, debug=False, callbacks=None):
+    def __init__(self, selected_analysts, config=None, debug=False, callbacks=None, run_provenance=None):
         self.config = config or {}
         self.callbacks = callbacks or []
+        self.run_provenance = run_provenance
         self.graph = _FakeGraphCore()
         self.propagator = SimpleNamespace(get_graph_args=lambda callbacks=None: {})
         type(self).last_instance = self

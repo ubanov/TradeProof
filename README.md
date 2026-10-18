@@ -25,16 +25,17 @@ version (as of 2026-10-18):
   Review on Nemotron 3 Super Cloud, Validation on Gemma 4 31B Cloud — see
   [Current preferred routing](#current-preferred-routing) for how this was
   chosen (this is still experimental, not a final answer).
-- **Preliminary results.** A small Market-only-analyst historical sanity
-  check (four cases so far) looks encouraging, but is explicitly **not**
-  statistically significant and is **not** a predictive-accuracy claim —
-  see [Initial historical outcome sanity check](#initial-historical-outcome-sanity-check).
-- **Next.** Close a larger historical batch (~140 recommendations, in
-  progress) comparing Trader-only vs. Portfolio-Manager-filtered
-  recommendations, and keep building the point-in-time News/Social evidence
-  archive (via `tradingagents archive-evidence`, see
-  [CHANGELOG.md](CHANGELOG.md#0101--2026-10-18)) needed to extend historical
-  batches past Market-only — full TODO list under
+- **Preliminary results: discarded, not encouraging or discouraging.** An
+  initial historical pilot (4-case sanity check, then 43 cases) was found to
+  have Decision Memory look-ahead leakage and is discarded in full — see
+  [Initial historical pilot (discontinued)](#initial-historical-pilot-discontinued--decision-memory-leakage-found).
+  No valid historical result exists yet.
+- **Next.** Restart the historical batch from scratch with
+  `--no-decision-memory` (see [Decision memory isolation](#decision-memory-isolation)),
+  comparing Trader-only vs. Portfolio-Manager-filtered recommendations, and
+  keep building the point-in-time News/Social evidence archive (via
+  `tradingagents archive-evidence`, see [CHANGELOG.md](CHANGELOG.md#unreleased))
+  needed to extend historical batches past Market-only — full TODO list under
   [Planned experiments](#planned-experiments).
 
 ## Origin
@@ -156,6 +157,14 @@ most from upstream; the full, detailed list is in
   independent reasoning-effort and model configuration for the pipeline's
   generation (produce/synthesize/decide) and review (challenge/verify/audit)
   functions, instead of one model/effort setting for the whole pipeline.
+- **Decision Memory isolation** — `--no-decision-memory` (completely
+  stateless, no read/write) and `--decision-memory-root` (an isolated
+  store), so a historical/backtest run can be made provably independent of
+  any other session's reflections.
+- **PrePMSnapshot and `replay-pm`** — the Portfolio Manager's exact
+  effective input, frozen automatically before it runs, so a different
+  prompt/model can be replayed against it without re-running the rest of
+  the pipeline.
 
 ## Changes in this fork
 
@@ -474,6 +483,77 @@ full list of correctness fixes, see [CHANGELOG.md](CHANGELOG.md).
   automatically**; it only makes the basis a later check compares against
   auditable.
 
+### PrePMSnapshot
+
+Re-running a different Portfolio Manager prompt/model previously meant
+re-running the whole pipeline (Analysts → research debate → Research
+Manager → Trader → Risk reviewers → Risk cross-review) just to test a
+change isolated to the very last stage. `PrePMSnapshot` freezes the
+Portfolio Manager's exact effective input the instant before it runs, so a
+later experiment can replay **only** the Portfolio Manager against that
+same frozen evidence — no re-run of anything upstream, no new market-data
+calls, no new Decision Memory lookup.
+
+- **Created automatically**, unconditionally, on every run that goes
+  through `cli/run.py::execute_analysis` (`run`, `batch`, and the
+  interactive flow) — no opt-in flag. A bare `propagate()`/`backtest` call
+  does not get one, the same scoping `RecommendationRecord` already has
+  (see [RecommendationRecord (v1)](#recommendationrecord-v1) above).
+- **What it freezes**: the real `AgentState` dict the Portfolio Manager
+  node receives (every key except LangGraph's own `messages`
+  tool-calling history, which the node never reads) — not a hand-picked
+  summary, so nothing the node or its deterministic Risk-integrity check
+  actually consults can be silently missing. Plus this run's
+  `run_provenance` (models, seed, git, and the resolved Decision Memory
+  mode — see [Decision memory isolation](#decision-memory-isolation)
+  above), embedded directly rather than re-typed.
+- **Immutable, hashable, write-once**: `schema_version`, `snapshot_id`,
+  `created_at`, `content_hash` (a run never silently overwrites another's
+  snapshot; identical content is a no-op, any difference raises).
+- **Location**: `~/.tradingagents/ledger/pre_pm/<TICKER>/<snapshot-id>.json`
+  — a sibling of `recommendations/`, never mixed with `logs/`, `debug/`, or
+  Decision Memory.
+- **Linked from RecommendationRecord** (schema `1.3`): `pre_pm_snapshot`
+  (`snapshot_id`/`content_hash`/`path`) records which snapshot the
+  Portfolio Manager actually decided from — `null` on an older record, or
+  one from a run that never went through `execute_analysis`.
+
+Replaying only the Portfolio Manager:
+
+```powershell
+tradingagents replay-pm `
+    --snapshot "$HOME\.tradingagents\ledger\pre_pm\NVDA\<snapshot-id>.json"
+
+# Or against a different model/reasoning effort for this replay only --
+# the same --generation-llm/--generation-reasoning-effort/--validator-llm/
+# --validator-reasoning-effort/--validation flags run/batch already have,
+# reused rather than duplicated. Omitted, each falls back to what the
+# snapshot's own run_provenance recorded.
+tradingagents replay-pm `
+    --snapshot "$HOME\.tradingagents\ledger\pre_pm\NVDA\<snapshot-id>.json" `
+    --generation-llm nemotron-3-super:cloud
+```
+
+`replay-pm` loads the snapshot, validates its schema and `content_hash`,
+and calls the Portfolio Manager directly — it never constructs the
+compiled graph at all, so Analysts, the research debate, Research Manager,
+the Trader, and Risk structurally cannot run; the node itself never calls a
+market-data tool and never consults a live Decision Memory store (its only
+"past context" is whatever string the snapshot already froze). Each
+replay produces its own independent `PMReplayRecord`
+(`~/.tradingagents/ledger/pm_replays/<snapshot-id>/<replay-id>.json`) —
+many replays of the same snapshot coexist, and a replay never modifies the
+snapshot or any `RecommendationRecord`.
+
+This is **generation, not evaluation**: a replay never looks at a later
+price, never computes a return, and never decides which replay is
+"better" — that is the backtester/evaluator's job, on top of these
+records, not something `replay-pm` does itself. This is what makes it
+possible to compare, from the exact same frozen evidence: Trader-only
+behavior, the original Portfolio Manager's decision, and a future
+alternative Portfolio Manager prompt/model, without re-running the
+expensive upstream stages for each comparison.
+
 ### Non-interactive and batch CLI execution
 
 - Added non-interactive CLI execution so TradingAgents can be run from scripts
@@ -750,6 +830,73 @@ in the saved report's "Validation" section and, with `--trace-llm`, in the
 trace (`llm_role: "validator"`, plus the original agent's repair call still
 recorded under its own real role with a `..._validation_repair` call
 identity).
+
+### Decision memory isolation
+
+A historical/backtest pilot found that Decision Memory (`decision_log.py`'s
+append-only reflection log, fed back as "past context" into the Portfolio
+Manager's prompt) could leak look-ahead information into a historical run:
+every run settles that ticker's pending decisions on the way in, against
+real, already-elapsed market history, regardless of the run's own simulated
+`analysis_date` — see [Initial historical pilot (discontinued)](#initial-historical-pilot-discontinued--decision-memory-leakage-found)
+and [CHANGELOG.md](CHANGELOG.md#unreleased). This does **not** yet implement
+true point-in-time memory (`available_from <= analysis_date`) — that is
+future work — but adds two explicit escape hatches so a historical run can
+be made completely independent of Decision Memory:
+
+- **`--no-decision-memory`** — Decision Memory **off**: `read = false` and
+  `write = false`. No past reflections/outcomes are recovered, none reach
+  any agent's prompt, and this run's own decision is never written to the
+  store either. Every other artifact (logs, `result.json`,
+  RecommendationRecord, LLM traces, validation, reports, the ledger) is
+  unaffected — only the memory/reflection mechanism between sessions is
+  disabled.
+- **`--decision-memory-root <path>`** — Decision Memory **isolated**: both
+  read and write go to `<path>/trading_memory.md` instead of the normal
+  store, fully independent of it. Useful for an experiment that must not
+  read from or pollute live memory, without disabling memory outright.
+
+These are mutually exclusive and fail immediately, with a clear error, if
+both are given — never a silent pick:
+
+```text
+tradingagents run --ticker NVDA --date 2026-01-07
+                                           # normal: the configured/default
+                                           # memory_log_path, unchanged
+
+tradingagents run --ticker NVDA --date 2026-01-07 --no-decision-memory
+                                           # disabled: no read, no write
+
+tradingagents run --ticker NVDA --date 2026-01-07 \
+    --decision-memory-root ~/.tradingagents/backtests/experiment-001/memory
+                                           # isolated: read/write only there
+```
+
+Resolved once per run by
+`tradingagents.default_config.resolve_decision_memory_config` — the single
+place these two flags are consulted, which folds them into the
+`memory_log_path` `TradingMemoryLog` already reads, rather than scattering
+`if no_decision_memory:` checks through the pipeline. The resolved mode is
+always logged at startup (`Decision memory: enabled` / `disabled` /
+`enabled (root: ...)`), recorded in `run_provenance`, and (schema 1.2)
+auditable on the `RecommendationRecord` itself via
+`run.decision_memory_enabled` / `run.decision_memory_root`.
+
+Configuration:
+
+| Setting | Env var | CLI flag |
+|---|---|---|
+| Disable Decision Memory | `TRADINGAGENTS_DECISION_MEMORY_ENABLED=false` | `--no-decision-memory` |
+| Isolated Decision Memory root | `TRADINGAGENTS_DECISION_MEMORY_ROOT` | `--decision-memory-root` |
+
+Wired into `run`/`batch`. `backtest` already isolates its own decision log
+per run (a separate concern — see [Evaluating decisions over time](#evaluating-decisions-over-time))
+and does not expose these flags at the CLI level yet, though a
+programmatic caller can still set `decision_memory_enabled`/
+`decision_memory_root` on the config dict it passes in, since
+`TradingAgentsGraph.__init__` resolves them the same way regardless of
+caller. The interactive (`tradingagents`, no subcommand) flow does not
+prompt for these either; set the env vars above to affect it.
 
 ### Model overrides and LLM trace mode
 
@@ -1217,91 +1364,27 @@ This is encouraging evidence of some robustness to reviewer choice in the
 pipeline, but three cases are far too small a sample to claim statistical
 stability.
 
-#### Initial historical outcome sanity check
+#### Initial historical pilot (discontinued — Decision Memory leakage found)
 
-The first four Nemotron historical cases (the NVDA case above, plus the three
-follow-up tickers) were also checked against what the underlying price data
-actually did after the analysis date. This is an **engineering sanity check
-on deterministic execution semantics, not predictive validation**:
+An early historical Market-only pilot ran a 4-case outcome sanity check
+(NVDA/MSFT/LLY/XOM, January 2026) and then grew to 43 recommendations
+before a review of the memory/reflection path found that Decision
+Memory could leak look-ahead information into a historical run: settling
+a ticker's pending decisions on the way into every run (live or
+historical) resolves them against real, already-elapsed market history,
+regardless of the run's own simulated `analysis_date` — see
+[Decision memory isolation](#decision-memory-isolation) and
+[CHANGELOG.md](CHANGELOG.md#unreleased).
 
-| Ticker | Date | Trader plan | Portfolio decision | Underlying trade-plan outcome (counterfactual) |
-|---|---|---|---|---|
-| NVDA | 2026-01-07 | Buy | Overweight / REDUCE_RISK | Stop hit, ≈ -3.1% |
-| MSFT | 2026-01-15 | Sell | Underweight / REDUCE_RISK | Take-profit reached, ≈ +3.7% |
-| LLY | 2026-01-23 | Hold | Hold / KEEP | No trade; the next 10 sessions were volatile and ended near the starting level |
-| XOM | 2026-01-30 | Buy | Overweight / REDUCE_RISK | Take-profit reached, ≈ +3.6% |
-
-**Critical caveat**: `REDUCE_RISK` means the Portfolio Manager did **not**
-approve executing the Trader's plan exactly as written. These outcomes
-describe what would have happened to the underlying Trader price plan in
-isolation, not necessarily an executable final TradeProof recommendation.
-Four observations have **zero statistical significance**. They are included
-only to show that the deterministic stop/take-profit execution semantics
-produce plausible, inspectable results — this is explicitly **not** a
-"75% accuracy" (or any similar) claim, and no such metric should be derived
-from this table.
-
-#### First 20-case historical pilot checkpoint
-
-The first complete checkpoint of the Market-only historical pilot contains
-**20 recommendations**: NVDA, MSFT, LLY, and XOM on five analysis dates
-(`2026-01-07`, `2026-01-15`, `2026-01-23`, `2026-01-30`, and
-`2026-02-06`). All use the currently preferred experimental routing:
-DeepSeek V4.1 Flash Cloud / high for Generation, Nemotron 3 Super Cloud /
-medium for Review, and Gemma 4 31B Cloud for Validation.
-
-This checkpoint was reconstructed from the frozen run artifacts and evaluated
-as a **manual engineering comparison**, not as a portfolio backtest. Its main
-purpose was to test the marginal effect of the Portfolio Manager on the
-Trader's already-produced plan.
-
-- Trader produced **13 directional plans** (7 Buy, 6 Sell) and 7 Hold plans.
-- **11 of the 13 directional plans actually reached their entry condition**
-  inside the evaluation window; two XOM plans never triggered an entry.
-- Portfolio Manager returned **KEEP on only 4 of the 13 directional plans**;
-  the other 9 were `REDUCE_RISK`. Under the deliberately conservative pilot
-  interpretation where `REDUCE_RISK` means the full Trader plan is not
-  executed, this reduces 11 entry-triggered Trader opportunities to only
-  **4 fully executable Portfolio-filtered trades**.
-- In the first manual outcome pass, those four Portfolio-filtered trades split
-  **2 winners / 2 losers**.
-- The Trader-only side looked better in this small sample: among the
-  entry-triggered plans that could be scored unambiguously from the daily
-  OHLC path, the initial manual pass found **5 winners / 4 losers**, with two
-  cases left ambiguous/unresolved under daily-bar sequencing rules, and a
-  simple sum of trade returns of roughly **+5 percentage points**. This is a
-  sum of independent trade returns, **not portfolio return**.
-- A directional sanity check did **not** show an advantage from restricting
-  execution to Buy signals only. Of the 7 Buy plans, 5 reached entry; among
-  the 4 outcomes that were unambiguous from daily OHLC, 2 were winners and 2
-  losers (50%), versus 5 winners / 4 losers (55.6%) for the combined Buy+Sell
-  unambiguous Trader-only set. The unambiguous Buy subset contributed roughly
-  **+2 percentage points** of simple summed trade returns versus roughly **+5
-  percentage points** for the combined directional set. The sample is far too
-  small to infer persistent long/short edge, but it provides no evidence yet
-  that TradeProof should be constrained to long-only execution. Buy-only,
-  Sell-only, and combined directional performance will therefore be tracked
-  separately as the historical sample grows.
-
-The useful conclusion from this first checkpoint is therefore **not** that the
-Portfolio Manager should be removed. It is that its `REDUCE_RISK` behaviour is
-strong enough to be economically material and, in this sample, did not show a
-clear filtering advantage: it removed winning opportunities as well as losing
-ones and reduced participation substantially. The sample is far too small for
-a statistical claim, so the prompt/semantics are intentionally left unchanged
-while the larger historical batch runs.
-
-This result also motivates keeping two distinct measurements in subsequent
-analysis:
-
-1. **Trader-only counterfactual** — execute every valid Buy/Sell Trader plan.
-2. **Portfolio-filtered outcome** — apply Portfolio Manager disposition using
-   the experiment's frozen interpretation.
-
-`REDUCE_RISK` may eventually be better represented through deterministic
-position sizing rather than as a binary no/full-execution decision, but that
-change is deliberately deferred until the larger sample shows whether the
-Portfolio Manager adds or destroys marginal value.
+**Both the 4-case sanity check and the 43-case checkpoint — including the
+outcome tables and win/loss counts this section previously reported — are
+discarded.** They are not a clean point-in-time backtest and are not used
+as evidence of predictive capability, Portfolio Manager value, or anything
+else. They are kept out of this README beyond this note; the full
+historical batch is being restarted from scratch with
+`--no-decision-memory` (see
+[Historical pilot batch](#historical-pilot-batch-market-only--restarting-from-scratch)
+below). Valid results will be documented once that batch completes.
 
 ### Model architecture notes
 
@@ -1536,26 +1619,32 @@ similarly provider- and load-dependent.
 The following ideas are planned or under evaluation and should not be
 considered part of the implemented architecture until they are completed.
 
-### Historical pilot batch (Market-only) — in progress
+### Historical pilot batch (Market-only) — restarting from scratch
 
-A larger Market-only historical batch (on the order of **~140
-recommendations**) is currently running. It is **not yet closed**. The first
-20-case checkpoint is reported above as a provisional engineering result; no
-conclusion from the full batch is reported yet.
+A first attempt at a larger Market-only historical batch (planned at ~140
+recommendations) reached **43 cases** before a review of the memory/
+reflection path found that Decision Memory could leak look-ahead
+information into a historical run — see [Initial historical pilot
+(discontinued)](#initial-historical-pilot-discontinued--decision-memory-leakage-found)
+above, [Decision memory isolation](#decision-memory-isolation), and
+[CHANGELOG.md](CHANGELOG.md#unreleased). Those 43 cases are discarded; the
+batch is **restarting from scratch**, every run using `--no-decision-memory`
+so it is provably stateless with respect to any other session.
 
-- The four Nemotron historical cases documented in
-  [Cloud model experiment](#cloud-model-experiment-historical-market-only-january-2026)
-  above are part of this batch.
-- Goal: compare **Trader-only** recommendations against
-  **Portfolio-Manager-filtered** recommendations. The [Decision consistency
-  across reviewers](#decision-consistency-across-reviewers) cases so far show
-  the Portfolio Manager using `REDUCE_RISK` often; the open question is
-  whether that conservatism is filtering out losing trades, winning trades,
-  or both — not yet whether the Portfolio Manager "works" or "should be
-  removed".
+- Goal (unchanged): compare **Trader-only** recommendations against
+  **Portfolio-Manager-filtered** recommendations. The open question is
+  whether the Portfolio Manager's conservatism (observed informally as
+  frequent `REDUCE_RISK` use in the discarded runs) filters out losing
+  trades, winning trades, or both — not yet whether the Portfolio Manager
+  "works" or "should be removed". This question is **not yet answered**;
+  the discarded 43-case numbers are not used to answer it.
 - Evaluation should not stop at win rate: payoff/returns need to be
   considered too, with risk-adjusted comparison as a later step once there
   is enough settled data.
+- Same intentional scope as before: Market-only, no fundamentals, a
+  separate ledger from live/prospective recommendations (see methodology
+  constraints below) — the only change versus the discarded attempt is
+  `--no-decision-memory`.
 
 Methodology constraints:
 
@@ -1569,6 +1658,10 @@ Methodology constraints:
   recommendation ledger (see [RecommendationRecord (v1)](#recommendationrecord-v1)) —
   a backtest recommendation must never be written into the same ledger as a
   live, prospective one.
+- **Decision Memory off.** Every run in the restarted batch uses
+  `--no-decision-memory` (see [Decision memory isolation](#decision-memory-isolation))
+  so it cannot read or write reflections from any other run, historical or
+  live.
 
 ### Sequential backtest (after the historical pilot batch)
 

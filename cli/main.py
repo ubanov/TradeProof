@@ -34,6 +34,7 @@ from tradingagents.evidence_archive import (
     run_archive_evidence,
     summarize as summarize_evidence_captures,
 )
+from tradingagents.pm_replay import run_pm_replay
 from tradingagents.portfolio import load_portfolio
 from tradingagents.run_seed import resolve_base_seed, validate_configured_seed
 
@@ -204,6 +205,23 @@ def run_non_interactive(
         "Requires --validator-llm (or TRADINGAGENTS_VALIDATOR_LLM) when on; "
         "there is no silent fallback to the generation model.",
     ),
+    no_decision_memory: bool = typer.Option(
+        False, "--no-decision-memory",
+        help="Run completely stateless with respect to Decision Memory (see "
+        "README: 'Decision memory isolation'): no past reflections/outcomes "
+        "are read, and this run's own decision is never written to it "
+        "either. Every other artifact (logs, result.json, "
+        "RecommendationRecord, traces, validation, reports, the ledger) is "
+        "unaffected. Incompatible with --decision-memory-root.",
+    ),
+    decision_memory_root: str | None = typer.Option(
+        None, "--TRADINGAGENTS_DECISION_MEMORY_ROOT", "--decision-memory-root",
+        help="Use an isolated Decision Memory store rooted at this directory "
+        "instead of the normal one (see README: 'Decision memory "
+        "isolation') -- both read and write go there, never the normal "
+        "store. Useful for backtests/experiments that must not read or "
+        "pollute live memory. Incompatible with --no-decision-memory.",
+    ),
     trace_llm: bool = typer.Option(
         False, "--trace-llm",
         help="Save a complete, auditable trace of every LLM call (rendered "
@@ -281,6 +299,8 @@ def run_non_interactive(
             validator_llm=validator_llm,
             validator_reasoning_effort=validator_reasoning_effort,
             validation_enabled=validation_enabled,
+            no_decision_memory=no_decision_memory,
+            decision_memory_root=decision_memory_root,
             trace_llm=trace_llm,
             base_seed=base_seed,
             configured_seed=configured_seed,
@@ -431,6 +451,21 @@ def batch_non_interactive(
         "TRADINGAGENTS_VALIDATOR_LLM) when on; there is no silent fallback "
         "to the generation model.",
     ),
+    no_decision_memory: bool = typer.Option(
+        False, "--no-decision-memory",
+        help="Run every ticker in this batch completely stateless with "
+        "respect to Decision Memory (see README: 'Decision memory "
+        "isolation'): no past reflections/outcomes are read, and nothing is "
+        "written to it either. Every other artifact (logs, result.json, "
+        "RecommendationRecord, traces, validation, reports, the ledger) is "
+        "unaffected. Incompatible with --decision-memory-root.",
+    ),
+    decision_memory_root: str | None = typer.Option(
+        None, "--TRADINGAGENTS_DECISION_MEMORY_ROOT", "--decision-memory-root",
+        help="Use an isolated Decision Memory store rooted at this directory "
+        "for the whole batch instead of the normal one (see README: "
+        "'Decision memory isolation'). Incompatible with --no-decision-memory.",
+    ),
     trace_llm: bool = typer.Option(
         False, "--trace-llm",
         help="Save a complete, auditable trace of every LLM call (rendered "
@@ -500,6 +535,8 @@ def batch_non_interactive(
             validator_llm=validator_llm,
             validator_reasoning_effort=validator_reasoning_effort,
             validation_enabled=validation_enabled,
+            no_decision_memory=no_decision_memory,
+            decision_memory_root=decision_memory_root,
             trace_llm=trace_llm,
             base_seed=base_seed,
             configured_seed=configured_seed,
@@ -822,6 +859,73 @@ def archive_evidence_command(
     )
     if summary["error"]:
         raise typer.Exit(code=1)
+
+
+@app.command("replay-pm")
+def replay_pm_command(
+    snapshot: Path = typer.Option(  # noqa: B008 - Typer option declaration
+        ..., "--snapshot",
+        help="Path to a PrePMSnapshot JSON file (see README: 'PrePMSnapshot'), "
+        "e.g. ~/.tradingagents/ledger/pre_pm/<TICKER>/<snapshot-id>.json.",
+    ),
+    generation_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_GENERATION_LLM", "--generation-llm",
+        help="Override the Portfolio Manager's generation model for this replay. "
+        "Defaults to the model recorded in the snapshot's own run_provenance.",
+    ),
+    generation_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_GENERATION_REASONING_EFFORT", "--generation-reasoning-effort",
+        help="Override the generation reasoning effort for this replay. Defaults "
+        "to the snapshot's own recorded value.",
+    ),
+    validator_llm: str | None = typer.Option(
+        None, "--TRADINGAGENTS_VALIDATOR_LLM", "--validator-llm",
+        help="Override the Validator model for this replay. Defaults to the "
+        "snapshot's own recorded value. Only used when validation is enabled.",
+    ),
+    validator_reasoning_effort: str | None = typer.Option(
+        None, "--TRADINGAGENTS_VALIDATOR_REASONING_EFFORT", "--validator-reasoning-effort",
+        help="Override the Validator reasoning effort for this replay. Defaults "
+        "to the snapshot's own recorded value.",
+    ),
+    validation_enabled: bool | None = typer.Option(
+        None, "--validation/--no-validation",
+        help="Override whether the Validator LLM pass runs for this replay. "
+        "Defaults to the snapshot's own recorded validation_enabled.",
+    ),
+):
+    """Re-run ONLY the Portfolio Manager against a frozen PrePMSnapshot.
+
+    Loads `--snapshot`, validates its schema and content_hash, and replays
+    the Portfolio Manager's decision against its exact frozen evidence --
+    never re-running Analysts, the research debate, Research Manager, the
+    Trader, or Risk, never calling a market-data tool, and never consulting
+    Decision Memory (its only "past context" is whatever the snapshot
+    already froze). Produces a new, independent PMReplayRecord; the
+    original snapshot and any RecommendationRecord are never modified. See
+    README: "PrePMSnapshot".
+    """
+    echo = timestamped_echo()
+    try:
+        record, written_path = run_pm_replay(
+            snapshot_path=snapshot,
+            generation_model=generation_llm,
+            generation_reasoning_effort=generation_reasoning_effort,
+            validator_model=validator_llm,
+            validator_reasoning_effort=validator_reasoning_effort,
+            validation_enabled=validation_enabled,
+        )
+    except Exception as exc:
+        echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+    echo(f"Replay: {record.replay_id}")
+    echo(f"Source snapshot: {record.source_snapshot_id} ({snapshot})")
+    echo(f"Generation model: {record.generation.name}")
+    if record.validation_enabled:
+        echo(f"Validator model: {record.validator.name}")
+    echo(f"Rating: {record.rating or 'unparsed'}; Disposition: {record.disposition or 'unparsed'}")
+    echo(f"PMReplayRecord: {written_path}")
 
 
 if __name__ == "__main__":

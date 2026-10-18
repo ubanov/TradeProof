@@ -48,7 +48,20 @@ from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_compon
 #   verify_recommendation_record hashes whatever raw keys are present, so
 #   1.0 records keep validating and verifying unchanged. Historical records
 #   are never migrated/rewritten.
-SCHEMA_VERSION = "1.1"
+#   1.1 -> 1.2: added run.decision_memory_enabled / run.decision_memory_root
+#   (see fork README: "Decision memory isolation") -- whether this
+#   recommendation was generated with Decision Memory on, off, or pointed at
+#   an isolated store. Backward-compatible the same way: an older record on
+#   disk simply lacks these two keys inside "run", which Pydantic fills with
+#   their defaults (True / None) rather than rejecting the record, and
+#   verify_recommendation_record still hashes only the raw keys actually on
+#   disk. Historical records are never migrated/rewritten.
+#   1.2 -> 1.3: added the optional pre_pm_snapshot block (see
+#   PrePMSnapshotRef below and fork README: "PrePMSnapshot") -- which frozen
+#   PrePMSnapshot (if any) the Portfolio Manager decided from. None on a
+#   record whose run predates this feature, or on a run that never went
+#   through execute_analysis (e.g. backtest) -- never guessed.
+SCHEMA_VERSION = "1.3"
 
 
 class IncompleteRecommendationError(ValueError):
@@ -240,6 +253,13 @@ class RunRef(BaseModel):
     depth: int | str | None = None
     selected_analysts: list[str] = Field(default_factory=list)
     reproducibility_status: ReproducibilityStatus = ReproducibilityStatus.UNKNOWN
+    # Added in schema 1.2 (see SCHEMA_VERSION): whether this recommendation
+    # was generated with Decision Memory on (default), off
+    # (--no-decision-memory), or pointed at an isolated store
+    # (--decision-memory-root) -- see fork README: "Decision memory
+    # isolation". Sourced from run_provenance["execution"], never guessed.
+    decision_memory_enabled: bool = True
+    decision_memory_root: str | None = None
 
 
 class ModelRoleRef(BaseModel):
@@ -369,6 +389,15 @@ class PriceBasisSnapshot(BaseModel):
     fetched_at: str | None = None
 
 
+class PrePMSnapshotRef(BaseModel):
+    """Which frozen PrePMSnapshot the Portfolio Manager decided from (see
+    ``tradingagents.pre_pm_snapshot`` and fork README: "PrePMSnapshot")."""
+
+    snapshot_id: str
+    content_hash: str
+    path: str
+
+
 class RecommendationRecord(BaseModel):
     schema_version: str = SCHEMA_VERSION
     recommendation_id: str
@@ -384,6 +413,10 @@ class RecommendationRecord(BaseModel):
     evidence: EvidenceRef
     artifacts: ArtifactsRef
     portfolio_context: dict[str, Any] | None = None
+    # Added in schema 1.3 (see SCHEMA_VERSION); None when no PrePMSnapshot
+    # was written for this run (older records, or a run that never went
+    # through execute_analysis).
+    pre_pm_snapshot: PrePMSnapshotRef | None = None
     # Added in schema 1.1 (see SCHEMA_VERSION); absent entirely from older
     # 1.0 records on disk, which still validate -- Pydantic treats a missing
     # key for an Optional field with a default as simply unset, not an error.
@@ -499,16 +532,24 @@ def build_recommendation_record(
     analysis_date = execution.analysis_date
 
     git = run_provenance.get("git") or {}
+    execution_block = run_provenance.get("execution") or {}
+    # Absent (older provenance) or explicitly null both mean "on", the
+    # resolve_decision_memory_config default -- never guessed as "off".
+    decision_memory_enabled = execution_block.get("decision_memory_enabled")
     run_ref = RunRef(
         ticker=ticker,
         analysis_date=analysis_date,
         tradeproof_version=run_provenance.get("tradeproof_version"),
         git=GitRef(**git),
         seed=SeedRef(**(run_provenance.get("seed") or {})),
-        language=(run_provenance.get("execution") or {}).get("language"),
-        depth=(run_provenance.get("execution") or {}).get("depth"),
-        selected_analysts=(run_provenance.get("execution") or {}).get("selected_analysts") or [],
+        language=execution_block.get("language"),
+        depth=execution_block.get("depth"),
+        selected_analysts=execution_block.get("selected_analysts") or [],
         reproducibility_status=_reproducibility_status(git),
+        decision_memory_enabled=(
+            True if decision_memory_enabled is None else bool(decision_memory_enabled)
+        ),
+        decision_memory_root=execution_block.get("decision_memory_root"),
     )
 
     prov_models = run_provenance.get("models") or {}
@@ -603,6 +644,14 @@ def build_recommendation_record(
         # passing a mismatched result dict.
         price_basis = None
 
+    # None when no PrePMSnapshot was written for this run (see fork README:
+    # "PrePMSnapshot") -- any caller that never went through
+    # execute_analysis, or an older run that predates this feature.
+    raw_pre_pm_snapshot = result.get("pre_pm_snapshot")
+    pre_pm_snapshot_ref = (
+        PrePMSnapshotRef.model_validate(raw_pre_pm_snapshot) if raw_pre_pm_snapshot else None
+    )
+
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "recommendation_id": str(uuid.uuid4()),
@@ -618,6 +667,9 @@ def build_recommendation_record(
         "artifacts": artifacts_ref.model_dump(mode="json"),
         "portfolio_context": None,
         "price_basis": price_basis.model_dump(mode="json") if price_basis is not None else None,
+        "pre_pm_snapshot": (
+            pre_pm_snapshot_ref.model_dump(mode="json") if pre_pm_snapshot_ref is not None else None
+        ),
     }
     payload["record_hash"] = compute_record_hash(payload)
     return RecommendationRecord.model_validate(payload)

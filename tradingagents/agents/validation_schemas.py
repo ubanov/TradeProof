@@ -34,6 +34,12 @@ class ValidationCategory(str, Enum):
     SCHEMA_ERROR = "SCHEMA_ERROR"
     INTERNAL_CONTRADICTION = "INTERNAL_CONTRADICTION"
     PROMPT_REQUIREMENT_VIOLATION = "PROMPT_REQUIREMENT_VIOLATION"
+    # A directional plan's stop-loss/take-profit on the wrong side of entry
+    # for its own stated direction (e.g. a SHORT with stop below entry) --
+    # its own category, not folded into RELATIONAL_ERROR: the defect is a
+    # structurally non-executable plan, not a stated-comparison mismatch in
+    # prose (see fork README / NVDA 2026-01-07 regression).
+    TRADE_GEOMETRY_ERROR = "TRADE_GEOMETRY_ERROR"
     # Used ONLY by the limited free-text recovery path (see validator.py:
     # "LIMITED VALIDATOR RECOVERY") when a small/local model signals FAIL/WARN
     # without a machine-parseable category -- an honest "something was

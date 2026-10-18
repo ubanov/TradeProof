@@ -239,8 +239,9 @@ class _FakeGraphCore:
 class _FakeTradingAgentsGraph:
     last_instance = None
 
-    def __init__(self, selected_analysts, config=None, debug=False, callbacks=None):
+    def __init__(self, selected_analysts, config=None, debug=False, callbacks=None, run_provenance=None):
         self.config = config or {}
+        self.run_provenance = run_provenance
         self.graph = _FakeGraphCore(_FULL_STATE_BEFORE_PM, KeyError("risk_stance_summary"))
         self.propagator = SimpleNamespace(get_graph_args=lambda callbacks=None: {})
         self.record_decision_called = False

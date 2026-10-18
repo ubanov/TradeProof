@@ -8,13 +8,102 @@ Changes that need action when upgrading are listed first in their release.
 
 TradeProof is a heavily modified fork of
 [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents),
-started from upstream **v0.5.1**. The entries from `[0.10.1]` through
+started from upstream **v0.5.1**. The entries from `[Unreleased]` through
 `[0.8.0]` below are specific to this fork; everything from `[0.5.1]` downward
 is the upstream TradingAgents history the fork started from (unchanged,
 including its own version numbers, dates and contributor credits). See
 [README.md](README.md) for what the fork currently looks like and
 ["How TradeProof differs from upstream"](README.md#how-tradeproof-differs-from-upstream)
 for a summary of the architectural divergence.
+
+## [Unreleased]
+
+### Fixed
+
+- **Decision Memory could leak look-ahead information into a historical
+  backtest.** The first historical Market-only pilot batch (43 cases) found
+  that `TradingMemoryLog`/the decision log could surface a reflection
+  containing a `realised_return`/`alpha` (or other outcome) that had not
+  actually happened yet as of the run's simulated `analysis_date` — because
+  every run settles that ticker's pending decisions against real,
+  already-elapsed market history on its way in, regardless of whether the
+  run itself is historical. Those 43 cases are **not** a clean point-in-time
+  backtest and are not used as evidence of anything. This version does
+  **not** yet implement true point-in-time memory (`available_from <=
+  analysis_date`) — that remains future work — but adds the two escape
+  hatches below so the next historical batch can run completely isolated
+  from Decision Memory instead.
+
+### Added
+
+- **`--no-decision-memory`** (`run`/`batch`): runs completely stateless with
+  respect to Decision Memory — no past reflections/outcomes are read, and
+  this run's own decision is never written to it either (`read = false`,
+  `write = false`, not just "stop reading"). Every other artifact (logs,
+  `result.json`, RecommendationRecord, LLM traces, validation, reports, the
+  ledger) is unaffected; only the memory/reflection mechanism between
+  sessions is disabled.
+- **`--decision-memory-root <path>`** (`run`/`batch`): points Decision
+  Memory (both read and write) at an isolated store under `<path>`, fully
+  independent of the normal store — useful for experiments that must not
+  read from or pollute live memory. `--no-decision-memory` and
+  `--decision-memory-root` are incompatible together and fail immediately
+  with a clear error rather than silently picking one.
+- Centralized in `tradingagents.default_config.resolve_decision_memory_config`
+  (called once per run, from `TradingAgentsGraph.__init__` and from
+  `execute_analysis`/`build_headless_config`) — the one place these two
+  flags are consulted, resolving them into the `memory_log_path`
+  `TradingMemoryLog` already reads, rather than scattering
+  `if no_decision_memory:` checks through the pipeline.
+- This run's Decision Memory mode (enabled/disabled, and the root when set)
+  is now always logged at startup, recorded in `run_provenance`, and
+  (schema 1.2) auditable on the `RecommendationRecord` itself via
+  `run.decision_memory_enabled` / `run.decision_memory_root`.
+
+### Changed
+
+- `RecommendationRecord` schema bumped 1.1 -> 1.2 for the two new
+  `run.decision_memory_enabled` / `run.decision_memory_root` fields.
+  Backward-compatible: an older record on disk simply lacks these two keys,
+  which default to `True` / `None` rather than being rejected.
+
+### Added
+
+- **`PrePMSnapshot`.** Freezes the Portfolio Manager's exact effective
+  input (the real `AgentState` dict it receives, minus LangGraph's own
+  non-JSON-safe `messages` history, plus this run's `run_provenance`) the
+  instant before it runs — immutable, hashable, write-once, under
+  `~/.tradingagents/ledger/pre_pm/<ticker>/<snapshot-id>.json`. Created
+  automatically on every run through `cli/run.py::execute_analysis`
+  (`run`/`batch`/interactive) — no opt-in flag; a bare `propagate()`/
+  `backtest` call gets none, the same scoping `RecommendationRecord`
+  already has. Motivated by wanting to compare Trader-only behavior, the
+  original Portfolio Manager decision, and future alternative Portfolio
+  Manager prompts/models from the exact same evidence, without re-running
+  the whole (expensive) upstream pipeline for each comparison.
+- **`tradingagents replay-pm --snapshot <path>`.** Loads a `PrePMSnapshot`,
+  validates its schema/`content_hash`, and re-runs **only** the Portfolio
+  Manager against its frozen state — structurally unable to run Analysts,
+  the research debate, Research Manager, the Trader, or Risk (this command
+  never constructs the compiled graph at all), and structurally unable to
+  call a market-data tool or consult live Decision Memory (the node's only
+  "past context" is whatever the snapshot already froze). Accepts the same
+  `--generation-llm`/`--generation-reasoning-effort`/`--validator-llm`/
+  `--validator-reasoning-effort`/`--validation`/`--no-validation` flags
+  `run`/`batch` already have (no new, duplicate flags); omitted, each falls
+  back to the model the snapshot's own `run_provenance` recorded. Produces
+  an independent `PMReplayRecord` under
+  `~/.tradingagents/ledger/pm_replays/<snapshot-id>/<replay-id>.json` —
+  many replays of one snapshot coexist, and a replay never modifies the
+  snapshot or the original `RecommendationRecord`. Deliberately
+  generation-only: a replay never looks at a later price, computes a
+  return, or judges which replay is "better" — that stays the
+  evaluator/backtester's job.
+- `RecommendationRecord` schema bumped 1.2 -> 1.3: an optional
+  `pre_pm_snapshot` block (`snapshot_id`/`content_hash`/`path`) records
+  which snapshot the Portfolio Manager decided from. Backward-compatible:
+  `null` on an older record or one from a run that never went through
+  `execute_analysis`.
 
 ## [0.10.1] — 2026-10-18
 

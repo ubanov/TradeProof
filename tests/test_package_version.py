@@ -17,11 +17,21 @@ function, so they can never disagree (test 4).
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
 import tradingagents.llm_trace as llm_trace
 from tradingagents.run_provenance import build_run_provenance
+
+# Read live from pyproject.toml rather than hardcoding the current version --
+# the literal goes stale (and silently asserts the WRONG thing, see #1) on
+# every version bump otherwise.
+_PYPROJECT_VERSION = re.search(
+    r'(?m)^version\s*=\s*"([^"]+)"',
+    (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8"),
+).group(1)
 
 
 @pytest.mark.unit
@@ -33,7 +43,7 @@ def test_1_checkout_pyproject_wins_over_stale_installed_metadata(monkeypatch):
     monkeypatch.setattr(
         "importlib.metadata.version", _stale_installed_metadata, raising=True
     )
-    assert llm_trace._package_version() == "0.10.0"
+    assert llm_trace._package_version() == _PYPROJECT_VERSION
 
 
 @pytest.mark.unit

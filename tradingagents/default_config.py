@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
@@ -42,6 +43,11 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
     "TRADINGAGENTS_MAX_TOKENS":           "max_tokens",
     "TRADINGAGENTS_SEED":                 "seed",
+    # Decision Memory isolation (see fork README: "Decision memory
+    # isolation") -- resolve_decision_memory_config is the single place
+    # these two are actually consulted.
+    "TRADINGAGENTS_DECISION_MEMORY_ENABLED": "decision_memory_enabled",
+    "TRADINGAGENTS_DECISION_MEMORY_ROOT":    "decision_memory_root",
     # Provider-specific reasoning/thinking knobs (None = each provider's own
     # default). Settable here for non-interactive runs; the CLI also offers an
     # interactive choice, which is skipped when the matching var is set.
@@ -232,6 +238,48 @@ def resolve_validation_config(config: dict) -> dict:
     return config
 
 
+def resolve_decision_memory_config(config: dict) -> dict:
+    """The single place ``decision_memory_enabled``/``decision_memory_root``
+    are actually consulted (see fork README: "Decision memory isolation").
+    Mutates and returns ``config`` in place, resolving both into the one
+    thing ``TradingMemoryLog`` reads: ``memory_log_path``. Nothing else
+    needs to branch on these two flags.
+
+    Precedence:
+
+    - ``decision_memory_enabled`` is ``False`` (``--no-decision-memory``):
+      ``memory_log_path`` is set to ``None``, which every read/write method
+      on ``TradingMemoryLog`` already treats as a complete no-op -- no past
+      context is recovered, no decision/reflection is ever written, and the
+      store on disk is never touched, regardless of ``decision_memory_root``
+      or any previously-configured ``memory_log_path``.
+    - ``decision_memory_root`` is set (``--decision-memory-root``):
+      ``memory_log_path`` becomes ``"<root>/trading_memory.md"`` -- an
+      isolated store, completely independent of the normal
+      ``memory_log_path`` default.
+    - Neither is set: ``memory_log_path`` is left exactly as configured
+      (env var or default) -- unchanged, default behavior.
+
+    Raises ``ValueError`` if both ``decision_memory_enabled=False`` and a
+    ``decision_memory_root`` are set at once -- deliberately incompatible
+    (see fork README), rather than silently picking one.
+    """
+    enabled = config.get("decision_memory_enabled", True)
+    root = config.get("decision_memory_root")
+    if not enabled and root:
+        raise ValueError(
+            "--no-decision-memory and --decision-memory-root are incompatible: "
+            "the first disables Decision Memory entirely, the second points it "
+            "at an isolated store. Pick one, not both."
+        )
+    if not enabled:
+        config["memory_log_path"] = None
+        return config
+    if root:
+        config["memory_log_path"] = str(Path(root).expanduser() / "trading_memory.md")
+    return config
+
+
 DEFAULT_CONFIG = resolve_role_config(_apply_env_overrides({
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR") or os.path.join(_TRADINGAGENTS_HOME, "logs"),
     # Independent of results_dir/--output-dir on purpose (see fork README:
@@ -248,6 +296,15 @@ DEFAULT_CONFIG = resolve_role_config(_apply_env_overrides({
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
     "memory_log_max_entries": None,
+    # Decision Memory isolation (see fork README: "Decision memory
+    # isolation"), resolved by resolve_decision_memory_config (called once
+    # per run, before TradingMemoryLog is constructed) into the effective
+    # memory_log_path above -- set False to run completely stateless with
+    # respect to past/future sessions (no read, no write), or point it at
+    # an alternate root to use a store isolated from the normal one. The
+    # default here preserves exactly the behavior before these existed.
+    "decision_memory_enabled": True,
+    "decision_memory_root": None,
     # LLM settings
     "llm_provider": "openai",
     # Canonical model-role keys (see fork README: "Model roles: Generation vs

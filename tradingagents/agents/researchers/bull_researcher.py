@@ -5,7 +5,7 @@ from tradingagents.agents.context import (
 )
 from tradingagents.agents.researchers.setup_tags import render_setup_tags
 from tradingagents.agents.researchers.thesis_flow import (
-    apply_trade_plan_changes,
+    apply_validated_trade_plan_changes,
     invoke_initial_thesis,
     invoke_review,
     recompute_trade_metrics,
@@ -158,7 +158,7 @@ def create_bull_researcher(generation_llm, review_llm):
             if review_dict is not None:
                 current_thesis = investment_debate_state.get("bull_thesis") or {}
                 if current_thesis:
-                    updated_thesis, withdrawn = apply_trade_plan_changes(
+                    updated_thesis, withdrawn, geometry_finding = apply_validated_trade_plan_changes(
                         current_thesis, review_dict
                     )
                     new_investment_debate_state["bull_thesis"] = updated_thesis
@@ -168,6 +168,16 @@ def create_bull_researcher(generation_llm, review_llm):
                     if withdrawn:
                         new_investment_debate_state["withdrawn_values"] = (
                             investment_debate_state.get("withdrawn_values", []) + withdrawn
+                        )
+                    if geometry_finding is not None:
+                        new_investment_debate_state["trade_geometry_rejections"] = (
+                            investment_debate_state.get("trade_geometry_rejections", [])
+                            + [{
+                                "side": "bull",
+                                "round": review_round,
+                                "claim": geometry_finding.claim,
+                                "reason": geometry_finding.reason,
+                            }]
                         )
                 new_investment_debate_state["bull_conviction_history"] = conviction_history + [
                     review_dict["conviction_after"]

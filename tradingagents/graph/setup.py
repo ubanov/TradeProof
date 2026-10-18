@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -23,6 +24,7 @@ from tradingagents.agents import (
 )
 from tradingagents.agents.state import AgentState
 from tradingagents.llm_trace import traced_node
+from tradingagents.pre_pm_snapshot import with_pre_pm_snapshot
 
 from .analyst_execution import build_analyst_execution_plan
 from .conditional_logic import ConditionalLogic
@@ -77,6 +79,9 @@ class GraphSetup:
         review_llm: Any,
         conditional_logic: ConditionalLogic,
         validator_llm: Any = None,
+        run_provenance: dict[str, Any] | None = None,
+        ledger_root: Path | None = None,
+        results_dir: str | None = None,
     ):
         """Initialize with required components.
 
@@ -85,11 +90,21 @@ class GraphSetup:
         integrated stages (currently Trader and Portfolio Manager) treat a
         ``None`` validator as "deterministic checks only, no Validator LLM
         call", exactly like any other provider without a feature enabled.
+
+        ``run_provenance`` is ``None`` unless the caller explicitly supplied
+        one (see fork README: "PrePMSnapshot") -- only then is the
+        Portfolio Manager node wrapped to write a snapshot before it runs.
+        A bare ``propagate()``/backtest caller that never goes through
+        ``cli/run.py::execute_analysis`` gets no snapshot, the same scoping
+        RecommendationRecord already has.
         """
         self.generation_llm = generation_llm
         self.review_llm = review_llm
         self.conditional_logic = conditional_logic
         self.validator_llm = validator_llm
+        self.run_provenance = run_provenance
+        self.ledger_root = ledger_root
+        self.results_dir = results_dir
 
     def setup_graph(
         self, selected_analysts=("market", "social", "news", "fundamentals")
@@ -135,6 +150,18 @@ class GraphSetup:
         neutral_analyst = create_neutral_debator(self.generation_llm, self.review_llm)
         conservative_analyst = create_conservative_debator(self.generation_llm, self.review_llm)
         portfolio_manager_node = create_portfolio_manager(self.generation_llm, validator_llm=self.validator_llm)
+        # PrePMSnapshot (see fork README: "PrePMSnapshot"): freezes exactly
+        # this node's own input the instant before it runs, so a later
+        # experiment can replay only the Portfolio Manager without
+        # re-running Analysts/debate/Trader/Risk. Unconditional whenever the
+        # caller supplied run_provenance -- no opt-in flag for a real run.
+        if self.run_provenance is not None:
+            portfolio_manager_node = with_pre_pm_snapshot(
+                portfolio_manager_node,
+                run_provenance=self.run_provenance,
+                ledger_root=self.ledger_root,
+                results_dir=self.results_dir,
+            )
 
         workflow = StateGraph(AgentState)
 

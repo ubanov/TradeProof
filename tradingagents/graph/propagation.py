@@ -84,6 +84,7 @@ class Propagator:
                     "bull_trade_metrics": {},
                     "bear_trade_metrics": {},
                     "new_data_exceptions": [],
+                    "trade_geometry_rejections": [],
                     "withdrawn_values": [],
                     "manager_integrity_status": "",
                     "manager_integrity_findings": [],

@@ -223,6 +223,40 @@ def test_review_can_keep_all_trade_plan_fields_unchanged():
 
 
 @pytest.mark.unit
+def test_nvda_2026_01_07_regression_invalid_short_stop_revision_is_rejected():
+    """End-to-end replay of the real NVDA 2026-01-07 bug through the actual
+    bear_node, not just the underlying function: a BEAR thesis (valid SHORT
+    geometry, stop above entry) whose second review round proposes REVISE-ing
+    the stop to a level BELOW entry (the exact LONG-side "2x ATR below the
+    close" reasoning mistakenly applied to a SHORT) must never reach
+    bear_thesis.stop_loss, and the rejection must be visible in state."""
+    state = _state()
+    bear_llm = _StructuredLLM([
+        _thesis(ResearchDirection.BEAR, entry_low=189.0, entry_high=190.5, tp=180.6, sl=195.2),
+        _review(62, 58),  # review round 1: no trade-plan change
+        _review(58, 62, sl_action="REVISE", sl_new=177.8),  # review round 2: the bug
+    ])
+    bear = create_bear_researcher(bear_llm, bear_llm)
+
+    _apply(state, bear)  # initial
+    _apply(state, bear)  # review round 1
+    _apply(state, bear)  # review round 2 -- the invalid REVISE
+
+    debate = state["investment_debate_state"]
+    assert debate["bear_thesis"]["stop_loss"] == 195.2
+    assert debate["bear_thesis"]["stop_loss"] != 177.8
+    assert debate["bear_thesis"]["take_profit"] == 180.6
+    rejections = debate["trade_geometry_rejections"]
+    assert len(rejections) == 1
+    assert rejections[0]["side"] == "bear"
+    assert "177.8" in rejections[0]["claim"]
+    # The conviction update from the SAME review round is unaffected by the
+    # trade-plan rejection -- only entry/stop_loss/take_profit revert. (75 is
+    # _thesis()'s own default initial conviction total.)
+    assert debate["bear_conviction_history"] == [75, 58, 62]
+
+
+@pytest.mark.unit
 def test_new_data_exception_is_recorded_and_tagged_by_side_and_round():
     state = _state()
     review_with_exception = ResearchReviewOutcome(

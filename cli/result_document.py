@@ -139,6 +139,7 @@ def result_document(execution, report_root: Path) -> dict[str, Any]:
         "structured": _structured_section(state),
         "run_provenance": state.get("run_provenance"),
         "price_basis": state.get("price_basis"),
+        "pre_pm_snapshot": state.get("pre_pm_snapshot_ref"),
     }
 
 

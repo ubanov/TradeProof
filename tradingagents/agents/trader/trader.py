@@ -21,9 +21,9 @@ from tradingagents.agents.structured import (
 )
 from tradingagents.agents.validator import validate_and_repair
 from tradingagents.agents.validator_deterministic import (
-    check_entry_stop_direction,
     check_price_field_percentage,
     check_relational_errors,
+    check_trade_geometry,
 )
 from tradingagents.prompts.loader import load_prompt, render_agent_prompt
 
@@ -37,9 +37,10 @@ _TRADER_CONTRACT = (
     "range), optional stop_loss, optional take_profit, optional "
     "position_sizing. entry_price, stop_loss and take_profit must be "
     "absolute prices in the instrument's quote currency, never percentages. "
-    "For a Buy, stop_loss must be below entry_price; for a Sell, stop_loss "
-    "must be above entry_price. take_profit is only set when a target is "
-    "actually defensible -- never invented merely because the field exists."
+    "For a Buy, stop_loss must be below and take_profit above entry_price; "
+    "for a Sell, stop_loss must be above and take_profit below entry_price. "
+    "take_profit is only set when a target is actually defensible -- never "
+    "invented merely because the field exists."
 )
 
 
@@ -52,8 +53,29 @@ def _trader_deterministic_checks(text: str, parsed):
     # percentage, and must never be flagged as one (real-run regression).
     findings = check_relational_errors(text)
     findings += check_price_field_percentage(text)
-    if parsed is not None and parsed.entry_price is not None:
-        finding = check_entry_stop_direction(parsed.action.value, parsed.entry_price, parsed.stop_loss)
+    if parsed is not None:
+        # KNOWN GAP (see fork README): "Sell" here is always read as
+        # OPEN_SHORT. The Trader's 3-tier action (schemas.TraderAction) does
+        # not distinguish that from closing/reducing an existing LONG
+        # (sell-to-close), which would correctly have no "stop must be above
+        # entry" requirement at all. Resolving that needs portfolio-position
+        # awareness (PortfolioContext.position_in(ticker).quantity is signed
+        # and already carries this information) threaded into this check,
+        # which is deliberately out of scope here -- no new order-type model
+        # is introduced by this change. In practice this was already the
+        # exact scope ``check_entry_stop_direction`` (the function this
+        # replaces) applied to stop_loss alone; this only extends the same,
+        # already-accepted scope to take_profit and to entry ranges/
+        # reference_entry.
+        finding = check_trade_geometry(
+            direction=parsed.action.value,
+            entry_price=parsed.entry_price,
+            entry_low=parsed.entry_price_low,
+            entry_high=parsed.entry_price_high,
+            reference_entry=parsed.reference_entry,
+            stop_loss=parsed.stop_loss,
+            take_profit=parsed.take_profit,
+        )
         if finding is not None:
             findings.append(finding)
     return findings

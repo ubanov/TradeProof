@@ -19,7 +19,8 @@ Also check, using the same six categories, whether a research position:
 - describes its conviction score as a probability, likelihood, or chance of the market outcome rather than a self-assessed evidence-strength score (UNSUPPORTED_CLAIM);
 - changes conviction in a direction or magnitude the round's discussion does not support (OVERSTATED_INFERENCE);
 - revises or withdraws an entry/take-profit/stop-loss level without a stated reason grounded in already-supplied evidence (UNSUPPORTED_CLAIM);
-- reports an entry, take-profit, stop-loss, or derived risk/reward/ATR-distance figure that conflicts with the deterministic trade metrics supplied below (ARITHMETIC_ERROR).
+- reports an entry, take-profit, stop-loss, or derived risk/reward/ATR-distance figure that conflicts with the deterministic trade metrics supplied below (ARITHMETIC_ERROR);
+- places a stop-loss or take-profit on the wrong side of entry/reference for the position's own stated direction (LONG/BUY/BULL: stop below and target above entry/reference; SHORT/SELL/BEAR: stop above and target below entry/reference) -- a structural execution error (CONTRADICTION) that materially affects direction and risk/reward, never cleared just because the level's own arithmetic distance (e.g. an ATR multiple) is correctly computed. Directional trade geometry is mandatory, independent of how the distance was justified.
 
 Use LOW for immaterial imprecision, MEDIUM for a meaningful issue the manager should see, and HIGH only when the issue materially affects the thesis, direction, sizing, or risk/reward. One or more HIGH findings means FAIL. LOW/MEDIUM findings only mean WARN. No material findings means PASS.
 

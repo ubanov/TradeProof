@@ -43,6 +43,7 @@ from tradingagents.dataflows.source_coverage import (
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.default_config import (
     DEFAULT_CONFIG,
+    resolve_decision_memory_config,
     resolve_role_config,
     resolve_validation_config,
 )
@@ -325,6 +326,16 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
         validation_enabled if validation_enabled is not None else DEFAULT_CONFIG.get("validation_enabled", False)
     )
     config["output_language"] = selections.get("output_language", "English")
+    # Decision Memory isolation (see fork README: "Decision memory
+    # isolation") -- same fall-back-to-DEFAULT_CONFIG reasoning as
+    # validator_llm above; resolve_decision_memory_config (called downstream,
+    # e.g. in execute_analysis) is what actually consults these.
+    config["decision_memory_enabled"] = selections.get(
+        "decision_memory_enabled", DEFAULT_CONFIG.get("decision_memory_enabled", True)
+    )
+    config["decision_memory_root"] = selections.get(
+        "decision_memory_root", DEFAULT_CONFIG.get("decision_memory_root")
+    )
     # --checkpoint/--no-checkpoint overrides only when explicitly given; omitting
     # the flag preserves TRADINGAGENTS_CHECKPOINT_ENABLED / the default (#976).
     if checkpoint is not None:
@@ -452,6 +463,12 @@ def execute_analysis(
     # earlier, for a friendlier message before even parsing tickers/dates;
     # this is the safety net for any other caller (interactive, programmatic).
     config = resolve_validation_config(config)
+    # Same reasoning, for Decision Memory isolation (see fork README:
+    # "Decision memory isolation") -- fails loudly here, before any LLM
+    # client or provenance is built, if --no-decision-memory and
+    # --decision-memory-root were both set. TradingAgentsGraph.__init__
+    # below calls this again (idempotent), so any other caller is covered too.
+    config = resolve_decision_memory_config(config)
 
     # Per-ticker, not per-process: a batch run must not accumulate one running
     # total across every ticker it processes.
@@ -508,6 +525,7 @@ def execute_analysis(
             config=config,
             debug=True,
             callbacks=callbacks,
+            run_provenance=run_provenance,
         )
         started = time.monotonic()
         init_agent_state = graph.create_run_state(
