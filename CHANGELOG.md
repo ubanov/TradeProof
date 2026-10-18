@@ -1,10 +1,211 @@
 # Changelog
 
-All notable changes to TradingAgents are documented here.
+All notable changes to TradeProof are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed first in their release.
+
+TradeProof is a heavily modified fork of
+[TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents),
+started from upstream **v0.5.1**. The entries from `[0.10.1]` through
+`[0.8.0]` below are specific to this fork; everything from `[0.5.1]` downward
+is the upstream TradingAgents history the fork started from (unchanged,
+including its own version numbers, dates and contributor credits). See
+[README.md](README.md) for what the fork currently looks like and
+["How TradeProof differs from upstream"](README.md#how-tradeproof-differs-from-upstream)
+for a summary of the architectural divergence.
+
+## [0.10.1] — 2026-10-18
+
+### Docs
+
+- Reorganized README.md and CHANGELOG.md: moved the fork's dated
+  development history and bug-fix list out of README's "Changes in this
+  fork" into this file's own versioned entries, simplified the Cost
+  observations section into one table, updated the Planned-experiments TODO
+  list, and added a short "Summary" section near the top of README for
+  newcomers.
+
+### Added
+
+- **EvidenceArchive.** A standalone point-in-time NEWS/SOCIAL capture module
+  (`tradingagents/evidence_archive/`) and the `tradingagents archive-evidence`
+  CLI command. Downloads and preserves yfinance/Alpha Vantage news and
+  StockTwits/Reddit social posts as append-only, content-hashed JSON
+  snapshots, reusing the existing `dataflows` vendor functions rather than
+  reimplementing a provider. Not wired into `tradingagents run` — no LLM
+  call, no RecommendationRecord. Comment-line support added to ticker
+  universe files, and starter universe files added under `config/`.
+- `scripts/archive-evidence-loop.ps1`: a resident PowerShell console loop
+  (not a service or Task Scheduler job) that runs `tradingagents
+  archive-evidence` on a fixed America/New_York schedule, sequential only,
+  never catching up a missed slot.
+
+### Fixed
+
+- `validate_and_repair`'s early-return branch could leave
+  `research_plan_structured` / `portfolio_decision_structured` /
+  `trader_proposal_structured` permanently `null` when a structured call
+  fell back to accepted free text with no repair ever attempted. It now
+  attempts one bounded canonical recovery against the accepted text in that
+  case.
+
+## [0.10.0] — 2026-10-14
+
+### Added
+
+- **Immutable RecommendationRecord ledger.** Append-only, one JSON file per
+  recommendation, under `~/.tradingagents/ledger/recommendations/<ticker>/`.
+- Recommendation price basis, horizon resolution, outcome classification,
+  and take-profit preservation — the deterministic bookkeeping the ledger
+  needs to later evaluate a frozen historical recommendation against what
+  actually happened.
+- Deterministic execution rules for resolving a recommendation's outcome
+  (stop / take-profit / horizon-expiry semantics).
+
+### Fixed
+
+- Research review schema contract is enforced rather than assumed.
+- Repaired structured decisions are recovered correctly instead of being
+  lost after repair.
+- Withdrawn values are scoped per-claim instead of globally.
+- Tool date whitespace is normalized.
+- Automatic run directories are guaranteed unique.
+
+## [0.9.1] — 2026-10-11
+
+### Added
+
+- Source coverage reporting and explicit sentiment no-data handling.
+- Point-in-time SEC company events surfaced to the News analyst.
+- Unconditional run provenance recording.
+
+### Changed
+
+- Structured decision state is preserved through the pipeline rather than
+  only rendered to markdown.
+
+### Fixed
+
+- Hardened historical news vendor fallback.
+- Live instrument metadata is withheld in historical runs, so a historical
+  analysis is never served a present-day company profile.
+- Reloaded CLI modules re-sync correctly under tests.
+
+### Docs
+
+- Clarified the current validation stage; corrected an upstream
+  TradingAgents version reference.
+
+## [0.9.0] — 2026-10-06
+
+### Added
+
+- **Best-effort deterministic replay seed** (`--seed`), deriving stable
+  per-call seeds for providers that support it.
+- **Generation / Review model-routing architecture**, replacing the
+  quick/deep naming with independent per-role model and reasoning-effort
+  configuration, with full backward compatibility for the old names.
+- The repository is presented under the TradeProof name, with clear
+  upstream attribution.
+- **Validator role (bounded validation and repair).** A third model role,
+  alongside Generation/Review, wired into Trader and Portfolio Manager
+  (later extended to Research Manager): deterministic-first
+  contract/format/arithmetic/relational/unit checks on a candidate
+  response, with at most one bounded repair by the same original
+  agent/role followed by a single recheck.
+- **Trace-based model benchmark replay.** Selected final synthesis calls
+  can be replayed against different models using frozen evidence, without
+  rerunning the full pipeline or data-fetching tools.
+- Opt-in LLM trace/debug mode (`--trace-llm`) recording per-call
+  request/response/metadata.
+
+### Fixed
+
+- Restricted trader price-percentage validation.
+
+## [0.8.0] — 2026-10-02
+
+Squashes the accumulated early work on this fork on top of upstream
+TradingAgents v0.5.1.
+
+### Added
+
+- Externalized agent prompts to text files, plus a shared
+  `global_policy.txt` of evidence-integrity rules applied across agents.
+- Independent Bull/Bear initial theses with structured cross-review
+  rounds, conviction scoring, a shared research horizon, deterministic
+  setup tags, and deterministic trade-plan metrics.
+- **Research Verifier.** Checks the completed Bull/Bear debate for
+  unsupported numeric claims and arithmetic errors; a bounded Research
+  Repair pass applies structured fixes with explicit
+  APPLIED/TEXT_ONLY/NOT_RUN status tracking.
+- Deterministic manager-integrity check, preventing the Research Manager
+  from reintroducing unsupported thresholds the Verifier already cleared.
+- **Risk Management redesigned** from a round-robin debate into three
+  independent assessments (Aggressive/Conservative/Neutral, each carrying a
+  structured `risk_level`) plus one explicit cross-review round, backed by
+  a deterministic post-Risk integrity check and a frozen evidence set
+  reviewers may only cite, not extend.
+- Portfolio Manager carries a structured disposition
+  (KEEP/DEFER/REDUCE_RISK/REJECT_PLAN) independent of its investment
+  rating.
+- Fault-tolerant batch/single-run execution: a late failure preserves all
+  completed work, is tagged with the furthest reached `failure_stage`, and
+  saves a partial report/result instead of losing the run.
+- Rating/action parsing recognizes bolded standalone headings and
+  `Rating:`/`Recommendation:` labels consistently across Trader, Research
+  Manager, and Portfolio Manager output.
+- `tradingagents batch` only requires `--tickers`; date/output-dir/
+  language/depth/analysts all default sensibly.
+- Canonical recovery for Bull/Bear textual fallbacks when structured output
+  fails, with a deterministic anti-hallucination gate (no value may be
+  introduced that isn't already in the fallback text).
+
+### Fixed
+
+A set of correctness fixes found during an internal audit, applied on top
+of upstream behavior:
+
+- A decision whose holding window opened at a zero price no longer
+  silently divides to `inf`/`nan`; the memory log leaves it pending instead
+  of storing a corrupted return.
+- The Yahoo OHLCV cache is written atomically (temp file + rename), so two
+  graphs running concurrently can no longer read a partially-written cache
+  file for the same symbol.
+- `temperature` is no longer forwarded to OpenAI/Azure reasoning-tier
+  models that reject a non-default value.
+- FRED rate limits and outages (HTTP 429/5xx) are classified the same way
+  every other vendor's are, restoring the existing graceful-degradation
+  path.
+- A single invalid ticker in a batch run no longer aborts the rest of the
+  batch; the failure is isolated and reported per-ticker.
+- An Azure OpenAI client mislabeling (`azureopenai` vs `azure`), and a
+  non-Typer `exit()` call in the interactive ticker prompt replaced with
+  the CLI's normal clean-exit path.
+- The Sentiment Analyst's genuine `overall_score = 0` (maximally bearish)
+  is no longer treated as missing and overwritten with the band's
+  midpoint; a deterministically inferred score is now explicitly marked
+  `INFERRED_FROM_BAND` rather than presented as the model's own judgment.
+- A run that fails after the risk discussion completes no longer loses the
+  completed work: every agent prompt renders safely against missing
+  placeholders, and a partial failure is tagged with `failure_stage` and
+  saved as `partial_report.md`/`result.json`.
+- Rating/action parsing recognizes the Spanish labels
+  `Acción`/`Recomendación` the same way it recognizes their English
+  equivalents.
+- Expected, recoverable structured-output fallback now prints a concise
+  `[WARN] ...` line on stdout instead of going through `logging`'s default
+  stderr path, which PowerShell renders as a red `NativeCommandError` that
+  trained users to ignore it even while the pipeline continued normally.
+
+---
+
+## Upstream TradingAgents history (pre-fork)
+
+Everything below is the upstream TradingAgents changelog as it stood when
+this fork started, kept unchanged.
 
 ## [0.5.1] — 2026-09-24
 

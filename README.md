@@ -11,6 +11,32 @@ not a source of guaranteed or infallible financial recommendations. See the
 disclaimer under [TradingAgents Framework](#tradingagents-framework), which
 applies in full here.
 
+## Summary
+
+The sections below go into a lot of detail. For a newcomer, the short
+version (as of 2026-10-18):
+
+- **Architecture.** The research debate, verification, and risk-assessment
+  pipeline has been redesigned from upstream's open debate into independent
+  theses, structured cross-review, a deterministic Research Verifier,
+  bounded repair, and an independent-assessment Risk phase — see
+  [How TradeProof differs from upstream](#how-tradeproof-differs-from-upstream).
+- **Current model routing.** Generation on DeepSeek V4.1 Flash Cloud,
+  Review on Nemotron 3 Super Cloud, Validation on Gemma 4 31B Cloud — see
+  [Current preferred routing](#current-preferred-routing) for how this was
+  chosen (this is still experimental, not a final answer).
+- **Preliminary results.** A small Market-only-analyst historical sanity
+  check (four cases so far) looks encouraging, but is explicitly **not**
+  statistically significant and is **not** a predictive-accuracy claim —
+  see [Initial historical outcome sanity check](#initial-historical-outcome-sanity-check).
+- **Next.** Close a larger historical batch (~140 recommendations, in
+  progress) comparing Trader-only vs. Portfolio-Manager-filtered
+  recommendations, and keep building the point-in-time News/Social evidence
+  archive (via `tradingagents archive-evidence`, see
+  [CHANGELOG.md](CHANGELOG.md#0101--2026-10-18)) needed to extend historical
+  batches past Market-only — full TODO list under
+  [Planned experiments](#planned-experiments).
+
 ## Origin
 
 TradeProof began as a fork of
@@ -132,6 +158,11 @@ most from upstream; the full, detailed list is in
   functions, instead of one model/effort setting for the whole pipeline.
 
 ## Changes in this fork
+
+This section documents the architecture pieces this fork adds on top of
+upstream, as they currently behave — useful for auditing or extending the
+code. For the dated history of when each piece was introduced, and for the
+full list of correctness fixes, see [CHANGELOG.md](CHANGELOG.md).
 
 ### Prompt architecture
 
@@ -575,12 +606,12 @@ compatible model may still be used, and roles may share the same model):
 TRADINGAGENTS_GENERATION_LLM=deepseek-v4.1-flash:cloud
 TRADINGAGENTS_GENERATION_REASONING_EFFORT=high
 
-TRADINGAGENTS_REVIEW_LLM=qwen3.8-flash-next:125b-a6b-q4_K_M
+TRADINGAGENTS_REVIEW_LLM=nemotron-3-super:cloud
 TRADINGAGENTS_REVIEW_REASONING_EFFORT=medium
 
 # Validation is opt-in; validator_llm is required only when it is enabled.
 TRADINGAGENTS_VALIDATION_ENABLED=true
-TRADINGAGENTS_VALIDATOR_LLM=gemma4:26b
+TRADINGAGENTS_VALIDATOR_LLM=gemma4:31b-cloud
 ```
 
 #### Legacy naming
@@ -969,63 +1000,8 @@ not design a new one.**
 ### Bug fixes
 
 This fork also carries a set of correctness fixes found during an internal
-audit, applied on top of upstream behavior:
-
-- A decision whose holding window opened at a zero price (bad vendor tick, a
-  halted/delisted name) no longer silently divides to `inf`/`nan`; the memory
-  log now leaves it pending instead of storing a corrupted return that would
-  have poisoned any later average (e.g. a backtest's mean alpha for that
-  rating bucket).
-- The Yahoo OHLCV cache is now written atomically (temp file + rename), so two
-  graphs running concurrently in the same process can no longer read a
-  partially-written cache file for the same symbol.
-- `temperature` is no longer forwarded to OpenAI/Azure reasoning-tier models
-  (o-series, GPT-5+) when explicitly configured — those models reject a
-  non-default value, the same failure mode already handled for
-  `reasoning_effort`.
-- FRED rate limits and outages (HTTP 429/5xx) are now classified the same way
-  every other vendor's are, so the router's existing graceful-degradation path
-  applies instead of surfacing a generic HTTP error.
-- A single invalid ticker in a batch run (and the aggregate summary generated
-  afterward) can no longer abort the rest of the batch; the failure is now
-  isolated and reported per-ticker like any other.
-- Minor: an Azure OpenAI client was mislabeled as `azureopenai` instead of
-  `azure` in warnings; a non-Typer `exit()` call in the interactive ticker
-  prompt was replaced with the same clean-exit path used everywhere else in
-  the CLI.
-- The Sentiment Analyst's `overall_score = 0` (maximally bearish) was
-  incorrectly treated as a missing value and silently overwritten with the
-  band's midpoint; a genuine zero now survives unchanged, and a
-  deterministically inferred score is explicitly marked `INFERRED_FROM_BAND`
-  rather than presented as the model's own judgment (`score_source`).
-- A run that fails after the risk discussion completes (observed as an
-  uncaught `KeyError` building the Portfolio Manager prompt) no longer loses
-  the hours of completed work ahead of it: every agent prompt now renders
-  safely against missing placeholders instead of raising, and a failure
-  partway through the graph is caught, tagged with the furthest pipeline
-  stage reached (`failure_stage`), and saved as `partial_report.md` /
-  `result.json` with everything completed so far (analyst reports, Bull/Bear
-  research, verification, repair, the Research Manager's plan, the Trader's
-  plan, and the risk discussion) — clearly banner-marked as an incomplete run,
-  never presented as a final recommendation. A batch run's summary links a
-  failed ticker's partial report the same way it links a successful one's.
-- Rating/action parsing (Trader, Research Manager, Portfolio Manager) now
-  recognizes a bolded standalone heading (`**Hold**`, `**Overweight**`) and
-  `Rating:`/`Recommendation:` labels alike, instead of only one exact
-  `**Label**: Value` shape; an output that still can't be parsed keeps its raw
-  text and is marked `unparsed` rather than guessed at.
-- The Trader's action and the Research Manager's recommendation now also
-  recognize the Spanish labels `Acción`/`Recomendación` (with or without the
-  accent), so a Spanish-language run's `**Acción: Buy**` parses the same way
-  `**Action**: Buy` does instead of coming back `null`.
-- Expected, recoverable structured-output fallback (a provider falling back to
-  free text) now prints a concise `[WARN] ...` line on stdout instead of going
-  through `logging`'s default stderr path — under PowerShell, stderr from a
-  child process renders as a red `NativeCommandError` block, which trained
-  users to ignore red output even though the pipeline was continuing
-  normally. A genuine failure still surfaces through the existing
-  stderr/failure path unchanged.
-
+audit, applied on top of upstream behavior. See
+[CHANGELOG.md](CHANGELOG.md#080--2026-10-02) for the full list.
 
 ## Model evaluation and current routing
 
@@ -1043,19 +1019,26 @@ alternatives available at that point.
 
 | Model | Observed behaviour in TradeProof | Current status |
 |---|---|---|
-| **Qwen 3.8 Flash Next 125B** | Strong local reasoning and the best observed adversarial-review behaviour. Medium reasoning has been more useful than xhigh; xhigh was much slower without a consistent quality gain. | **Retained for Review** |
-| **DeepSeek V4.1 Flash** | Strong first-pass analysis and synthesis. High reasoning has repeatedly produced high-quality Generation outputs; max added substantially more verbosity without a consistent improvement. | **Retained for Generation** |
-| **Gemma 4 26B** | Weaker than Qwen/DeepSeek for broad investment analysis, but effective at narrow objective checks and bounded validation. | **Retained for Validation** |
+| **Qwen 3.8 Flash Next 125B** | Strong local reasoning and the best observed adversarial-review behaviour on the local workstation (see [Operational scale and local hardware](#operational-scale-and-local-hardware)). Medium reasoning has been more useful than xhigh; xhigh was much slower without a consistent quality gain. A representative full NVDA run can take close to ~2 hours on that hardware. | Local quality reference for Review; **superseded for large-scale historical work by Nemotron 3 Super Cloud** specifically because of runtime, not quality — see [Cloud model experiment](#cloud-model-experiment-historical-market-only-january-2026) below |
+| **DeepSeek V4.1 Flash** | Strong first-pass analysis and synthesis. High reasoning has repeatedly produced high-quality Generation outputs; max added substantially more verbosity without a consistent improvement. | **Retained for Generation** (local and cloud) |
+| **Gemma 4 26B** (local) | Weaker than Qwen/DeepSeek for broad investment analysis, but effective at narrow objective checks and bounded validation. | Superseded experimentally by **Gemma 4 31B Cloud** for historical-scale execution; still a reasonable local Validator choice |
 | **DeepSeek V4 Pro** | Strong results at high reasoning. Max reasoning increased verbosity and did not consistently improve the final analysis. | Evaluated; not currently preferred over V4.1 Flash for Generation |
-| **GPT-OSS 120B** | Reasonable general reasoning speed, but weaker structured-output behaviour and provenance discipline in the full pipeline. | Evaluated and not selected for the current routing |
+| **GPT-OSS 120B** | Reasonable general reasoning speed, but weaker structured-output behaviour and provenance discipline in the full pipeline; one observed run produced a malformed tool-call JSON during Market analysis. | Evaluated and not selected for the current routing |
 | **GPT-OSS 20B** | Very fast and useful for smoke/guardrail testing, but insufficient for maximum-quality investment analysis. | Retained only for fast development/smoke tests |
 | **Qwen 3.8 27B dense** | High analytical quality in the observed run, but extremely slow on the tested hardware. | Not practical on the current local hardware/configuration |
+| **Nemotron 3 Super** (local, 120B) | Attempted locally; memory requirements were unsuitable for the current workstation and produced an OOM-type failure. | Not viable locally on current hardware — this is a **hardware constraint, not a quality judgement**; the cloud-hosted version was tested separately (next row) |
+| **Nemotron 3 Super Cloud** | In a small cloud comparison on historical Market-only runs, produced the most stable Research Verifier/Validation outcomes observed among the reviewer candidates tested — see [Cloud model experiment](#cloud-model-experiment-historical-market-only-january-2026) below. Slower than some cloud alternatives. | **Retained for Review (cloud, experimental)** |
+| **Mistral Large 3 Cloud** | Often faster and more concise than Nemotron; in four tested cases the Research Verifier returned FAIL-after-repair more consistently. Sometimes produced useful conservative corrections. | Evaluated; not currently preferred over Nemotron 3 Super for Review |
+| **Gemma 4 31B Cloud** | Fast validator; detected real consistency/contract problems in testing rather than acting only as a formatting checker. Some calls were covered by provider free-tier credits during testing (see [Cost observations](#cost-observations)). | **Retained for Validation (cloud, experimental)** |
 
 These are **project-specific observations**, not general model rankings. They
 depend on TradeProof's prompts, architecture, provider/backend, quantization and
 hardware. "Not selected" means the model was actually exercised and did not
 offer enough advantage for the role being considered; it does not mean the
-model is generally poor.
+model is generally poor. A larger total parameter count also does not
+translate directly into better TradeProof-specific behaviour — see
+[Model architecture notes](#model-architecture-notes) below, where Nemotron
+currently outperforms two larger models at the Review role.
 
 #### Earlier full-pipeline screening results
 
@@ -1149,40 +1132,256 @@ and sometimes wording source-unavailability as if it proved that no sentiment
 posts existed. Those weaknesses as a broad analyst do not prevent Gemma from
 being effective as a narrowly-scoped Validator.
 
+### Cloud model experiment (historical Market-only, January 2026)
+
+The local full-pipeline comparisons above motivated a separate, narrower-scope
+experiment: move to **cloud-hosted models on historical, Market-analyst-only
+runs**, which made a larger batch of historical samples practical than a
+multi-hour local run per ticker would allow. Every run in this experiment used:
+
+- analyst set: Market only
+- research depth: Medium
+- output language: Spanish
+- generation model: DeepSeek V4.1 Flash Cloud, high reasoning
+- validator: Gemma 4 31B Cloud
+- validation enabled
+- LLM tracing enabled, for comparison
+- historical analysis dates in January 2026
+
+Cloud inference is **not guaranteed deterministic**, even with a fixed CLI
+seed. The seed drives TradeProof's own best-effort deterministic replay (see
+"Best-effort deterministic replay" under [Reproducibility](#reproducibility));
+it does not make a remote provider's generation reproducible run-to-run, and
+none of the figures below should be read as if it did.
+
+#### Review model comparison (single NVDA case)
+
+Three reviewer candidates were compared on one representative historical case
+(NVDA, analysis date `2026-01-07`):
+
+| Reviewer | Runtime | LLM calls | Tool calls | Input tokens | Output tokens | Fallback warnings | Validation | Research verifier | Manager integrity | Risk integrity |
+|---|---:|---:|---:|---:|---:|---:|---|---|---|---|
+| DeepSeek V4.1 Flash | 00:16:49 | 33 | 11 | 303,355 | 161,283 | 5 | 2 PASS / 1 FAIL / 1 repair / 1 unresolved | WARN | WARN | WARN |
+| Nemotron 3 Super Cloud | 00:28:55 | 25 | 8 | 206,903 | 103,407 | 1 | 3 PASS / 0 FAIL / 0 repairs / 0 unresolved | WARN | WARN | WARN |
+| Mistral Large 3 Cloud | 00:05:13 | 27 | 12 | 241,000 | 62,833 | 1 | 2 PASS / 1 FAIL / 1 repair / 1 unresolved | not recorded | PASS | PASS |
+
+A single case cannot establish which reviewer is generally better. It is kept
+here because it is what motivated the three-ticker follow-up below, not as a
+conclusion in its own right.
+
+#### Follow-up: Nemotron vs. Mistral across three more tickers
+
+The Nemotron/Mistral comparison was extended to three more historical cases
+(MSFT `2026-01-15`, LLY `2026-01-23`, XOM `2026-01-30`):
+
+**Nemotron 3 Super Cloud**
+
+| Ticker | Runtime | LLM calls | Tool calls | Input tokens | Output tokens | Research verifier | Manager integrity | Risk integrity | Validation |
+|---|---:|---:|---:|---:|---:|---|---|---|---|
+| MSFT | 00:34:04 | 25 | 11 | 239,989 | 123,913 | WARN | PASS | PASS | 3 PASS / 0 FAIL / 0 repairs / 0 unresolved |
+| LLY | 00:31:25 | 28 | 10 | 256,454 | 97,115 | PASS | PASS | PASS | 3 PASS / 0 FAIL / 0 repairs / 0 unresolved |
+| XOM | 00:27:15 | 23 | 13 | 232,542 | 96,876 | WARN | PASS | WARN (2 findings) | 2 PASS / 1 WARN / 0 FAIL / 0 repairs / 0 unresolved |
+
+**Mistral Large 3 Cloud**
+
+| Ticker | Runtime | LLM calls | Tool calls | Input tokens | Output tokens | Research verifier | Manager integrity | Risk integrity | Validation |
+|---|---:|---:|---:|---:|---:|---|---|---|---|
+| MSFT | 00:38:07 | 29 | 10 | 342,369 | 98,294 | FAIL after repair | WARN | PASS | 3 PASS / 0 FAIL |
+| LLY | 00:44:32 | 34 | 10 | 340,696 | 93,513 | FAIL after repair | PASS | PASS | 3 PASS / 0 FAIL (one downstream validation repair succeeded) |
+| XOM | 00:13:30 | 25 | 12 | 278,370 | 59,894 | FAIL after repair | PASS | WARN | 3 PASS / 0 FAIL |
+
+Across these three cases, Nemotron produced a more stable research-review
+chain — the Research Verifier never failed after repair, against three
+FAIL-after-repair outcomes out of three for Mistral. Mistral was generally
+more concise and was substantially faster in some runs, but repair/
+re-verification overhead made the complete pipeline slower than Nemotron in
+other runs, and it sometimes made useful, conservative corrections; that is
+not evidence that Mistral is a weak model, only that **Nemotron
+currently fits TradeProof's reviewer contract better**, particularly when
+research-chain stability is prioritized over runtime. This is a project- and
+role-specific observation from four small cases, **not** a claim that
+Nemotron is more capable than Mistral in general.
+
+#### Decision consistency across reviewers
+
+In the three follow-up cases, Nemotron and Mistral reached the same broad
+final directional outcome despite taking different review paths to get there:
+
+| Ticker | Trader action | Portfolio rating | Portfolio disposition |
+|---|---|---|---|
+| MSFT | Sell | Underweight | REDUCE_RISK |
+| LLY | Hold | Hold | KEEP |
+| XOM | Buy | Overweight | REDUCE_RISK |
+
+This is encouraging evidence of some robustness to reviewer choice in the
+pipeline, but three cases are far too small a sample to claim statistical
+stability.
+
+#### Initial historical outcome sanity check
+
+The first four Nemotron historical cases (the NVDA case above, plus the three
+follow-up tickers) were also checked against what the underlying price data
+actually did after the analysis date. This is an **engineering sanity check
+on deterministic execution semantics, not predictive validation**:
+
+| Ticker | Date | Trader plan | Portfolio decision | Underlying trade-plan outcome (counterfactual) |
+|---|---|---|---|---|
+| NVDA | 2026-01-07 | Buy | Overweight / REDUCE_RISK | Stop hit, ≈ -3.1% |
+| MSFT | 2026-01-15 | Sell | Underweight / REDUCE_RISK | Take-profit reached, ≈ +3.7% |
+| LLY | 2026-01-23 | Hold | Hold / KEEP | No trade; the next 10 sessions were volatile and ended near the starting level |
+| XOM | 2026-01-30 | Buy | Overweight / REDUCE_RISK | Take-profit reached, ≈ +3.6% |
+
+**Critical caveat**: `REDUCE_RISK` means the Portfolio Manager did **not**
+approve executing the Trader's plan exactly as written. These outcomes
+describe what would have happened to the underlying Trader price plan in
+isolation, not necessarily an executable final TradeProof recommendation.
+Four observations have **zero statistical significance**. They are included
+only to show that the deterministic stop/take-profit execution semantics
+produce plausible, inspectable results — this is explicitly **not** a
+"75% accuracy" (or any similar) claim, and no such metric should be derived
+from this table.
+
+#### First 20-case historical pilot checkpoint
+
+The first complete checkpoint of the Market-only historical pilot contains
+**20 recommendations**: NVDA, MSFT, LLY, and XOM on five analysis dates
+(`2026-01-07`, `2026-01-15`, `2026-01-23`, `2026-01-30`, and
+`2026-02-06`). All use the currently preferred experimental routing:
+DeepSeek V4.1 Flash Cloud / high for Generation, Nemotron 3 Super Cloud /
+medium for Review, and Gemma 4 31B Cloud for Validation.
+
+This checkpoint was reconstructed from the frozen run artifacts and evaluated
+as a **manual engineering comparison**, not as a portfolio backtest. Its main
+purpose was to test the marginal effect of the Portfolio Manager on the
+Trader's already-produced plan.
+
+- Trader produced **13 directional plans** (7 Buy, 6 Sell) and 7 Hold plans.
+- **11 of the 13 directional plans actually reached their entry condition**
+  inside the evaluation window; two XOM plans never triggered an entry.
+- Portfolio Manager returned **KEEP on only 4 of the 13 directional plans**;
+  the other 9 were `REDUCE_RISK`. Under the deliberately conservative pilot
+  interpretation where `REDUCE_RISK` means the full Trader plan is not
+  executed, this reduces 11 entry-triggered Trader opportunities to only
+  **4 fully executable Portfolio-filtered trades**.
+- In the first manual outcome pass, those four Portfolio-filtered trades split
+  **2 winners / 2 losers**.
+- The Trader-only side looked better in this small sample: among the
+  entry-triggered plans that could be scored unambiguously from the daily
+  OHLC path, the initial manual pass found **5 winners / 4 losers**, with two
+  cases left ambiguous/unresolved under daily-bar sequencing rules, and a
+  simple sum of trade returns of roughly **+5 percentage points**. This is a
+  sum of independent trade returns, **not portfolio return**.
+- A directional sanity check did **not** show an advantage from restricting
+  execution to Buy signals only. Of the 7 Buy plans, 5 reached entry; among
+  the 4 outcomes that were unambiguous from daily OHLC, 2 were winners and 2
+  losers (50%), versus 5 winners / 4 losers (55.6%) for the combined Buy+Sell
+  unambiguous Trader-only set. The unambiguous Buy subset contributed roughly
+  **+2 percentage points** of simple summed trade returns versus roughly **+5
+  percentage points** for the combined directional set. The sample is far too
+  small to infer persistent long/short edge, but it provides no evidence yet
+  that TradeProof should be constrained to long-only execution. Buy-only,
+  Sell-only, and combined directional performance will therefore be tracked
+  separately as the historical sample grows.
+
+The useful conclusion from this first checkpoint is therefore **not** that the
+Portfolio Manager should be removed. It is that its `REDUCE_RISK` behaviour is
+strong enough to be economically material and, in this sample, did not show a
+clear filtering advantage: it removed winning opportunities as well as losing
+ones and reduced participation substantially. The sample is far too small for
+a statistical claim, so the prompt/semantics are intentionally left unchanged
+while the larger historical batch runs.
+
+This result also motivates keeping two distinct measurements in subsequent
+analysis:
+
+1. **Trader-only counterfactual** — execute every valid Buy/Sell Trader plan.
+2. **Portfolio-filtered outcome** — apply Portfolio Manager disposition using
+   the experiment's frozen interpretation.
+
+`REDUCE_RISK` may eventually be better represented through deterministic
+position sizing rather than as a binary no/full-execution decision, but that
+change is deliberately deferred until the larger sample shows whether the
+Portfolio Manager adds or destroys marginal value.
+
+### Model architecture notes
+
+Brief, provider-documented architecture context for the cloud models above,
+included for context rather than as a quality signal — parameter counts are
+as described in each provider's own documentation and are not independently
+verified by this project. A larger total parameter count does not translate
+directly into better TradeProof-specific behaviour: Nemotron currently
+outperforms both larger models at the Review role in this project despite
+having the smallest parameter count of the three.
+
+| Model | Architecture | Total / active parameters (per provider docs) | Notes |
+|---|---|---|---|
+| DeepSeek V4.1 Flash | MoE | ≈552B total, a much smaller active subset | Strong cost/performance characteristics for Generation in this project |
+| Mistral Large 3 | MoE | ≈675B total, ≈41B active | Strong structured/agentic capability; more Research Verifier FAILs observed than Nemotron in TradeProof review tests |
+| Nemotron 3 Super | MoE | ≈120B total, ≈12B active | Designed for agentic/collaborative workloads; currently the most stable TradeProof reviewer observed |
+| Gemma 4 31B | Dense | ≈31B | Narrow validator; detected real consistency/contract problems in testing, not only formatting issues |
+
 ### Current preferred routing
 
-Based on the experiments so far, the current preferred experimental routing is:
+**This routing is experimental** and reflects the cloud model experiment
+above. It may change again after the larger historical and prospective
+evaluations described in [Planned experiments](#planned-experiments).
 
 ```text
 GENERATION
-    DeepSeek V4.1 Flash / high
+    DeepSeek V4.1 Flash Cloud / high
           |
           v
 first-pass analysts, initial theses,
 Research Manager, Trader, Portfolio Manager
 
 REVIEW
-    Qwen 125B / medium
+    Nemotron 3 Super Cloud / medium
           |
           v
 adversarial debate, Research Verifier,
 research repair and Risk cross-review
 
 VALIDATION
-    Gemma 4 26B
+    Gemma 4 31B Cloud
           |
           v
 bounded objective checks and one-shot repair
 ```
 
-This routing is **not chosen because it is the fastest**. Qwen is kept where its
-slower, more critical reasoning has shown the most value; DeepSeek is used for
-generation because controlled comparisons have not shown a quality advantage
-large enough to justify running Qwen for every first-pass stage; Gemma is kept
-in the intentionally narrow Validator role where objective checking matters more
-than broad investment synthesis.
+Rationale:
 
-One controlled MSFT replay illustrates the operational difference:
+- **DeepSeek** — strong Generation quality, fast enough for large experiments,
+  and a good cost profile (see [Model architecture notes](#model-architecture-notes)
+  and [Cost observations](#cost-observations)).
+- **Nemotron** — slower than some cloud alternatives, but the strongest Review
+  stability observed so far: fewer unresolved verifier/validation problems
+  across the cases tested (see [Cloud model experiment](#cloud-model-experiment-historical-market-only-january-2026)
+  above). Quality is currently prioritized over runtime.
+- **Gemma 4 31B** — a fast validator with good structured validation
+  behaviour; it detected meaningful inconsistencies in real runs, and
+  provider free-tier credits reduced observed cost during the experiment.
+
+#### Previous local-only routing (superseded for large-scale historical work)
+
+Before the cloud experiment above, the preferred routing was local-only:
+
+```text
+GENERATION    DeepSeek V4.1 Flash / high
+REVIEW        Qwen 3.8 Flash Next 125B / medium
+VALIDATION    Gemma 4 26B
+```
+
+This routing was **not moved away from because of quality** — Qwen's
+adversarial review remains the strongest locally-observed Review behaviour
+(see [Models evaluated](#models-evaluated) above), and Qwen/Gemma 4 26B
+remain reasonable choices for smaller-scale or fully offline work. It was
+moved away from specifically for **large-scale historical execution**, where
+a representative full NVDA run under Qwen took close to ~2 hours on the
+current workstation (see [Operational scale and local hardware](#operational-scale-and-local-hardware)) —
+impractical for a 20+ run historical batch (see [Planned experiments](#planned-experiments)).
+
+One controlled MSFT replay illustrates the local operational difference that
+originally motivated this (unchanged measurement, kept for reference):
 
 | Model | Total measured time |
 |---|---:|
@@ -1190,22 +1389,52 @@ One controlled MSFT replay illustrates the operational difference:
 | Gemma 4 26B | 6m 26s |
 | DeepSeek V4.1 Flash high | 2m 34s |
 
-These timings are hardware/provider-specific and are not the selection target.
-If a slower configuration later proves materially better for decision quality,
-TradeProof should prefer the slower configuration.
+These timings are hardware/provider-specific. Runtime alone was not the
+reason Qwen was originally selected for Review — review quality was; runtime
+only became decisive once the goal shifted to running a much larger
+historical batch than was previously attempted.
 
 ### Cost observations
 
-Observed cloud spend has so far been small relative to the volume of analysis:
+Observed cloud spend so far, summarized. All figures are **observed wallet
+deltas** for the specific test runs described, not guaranteed provider
+pricing; several were partly offset by provider free-tier credits. Tracked
+for operational awareness, not as the primary model-selection criterion.
 
-- eight complete hybrid runs using DeepSeek for generation and local models for
-  review/validation consumed approximately **$0.78** of cloud credit;
-- one controlled replay benchmark using DeepSeek alongside the two local models
-  consumed approximately **$0.03** of cloud credit.
+| Configuration | Runs | Observed cost | Notes |
+|---|---:|---:|---|
+| Market-only, DeepSeek-as-reviewer (first cloud historical run, see [Cloud model experiment](#cloud-model-experiment-historical-market-only-january-2026)) | 1 | ≈ $0.13 | — |
+| Market-only, Nemotron-reviewer | 4 | ≈ $0.38 total (≈ $0.095/run) | Nemotron and Gemma calls partly covered by Ollama free-tier credits — not a reliable full-price estimate |
+| Market-only, Mistral-reviewer | 1 | ≈ $0.06 | same free-tier caveat |
+| Hybrid: DeepSeek generation, local Review/Validation | 8 | ≈ $0.78 total (≈ $0.10/run) | generation-only cloud cost; review/validation ran locally at no cloud cost |
+| Controlled replay benchmark, DeepSeek alongside the two local models | 1 | ≈ $0.03 | — |
 
-These are empirical development observations, not guaranteed provider pricing.
-Cost is tracked for operational awareness rather than used as the primary
-model-selection criterion.
+**Gap:** every run above uses only the Market analyst. The current nightly
+production ANALYSIS job (market + fundamentals + news + social analysts,
+depth medium — see
+[Model roles](#model-roles-generation--validation--review) and the pipeline
+cost benchmark under
+[Operational scale and local hardware](#operational-scale-and-local-hardware))
+uses substantially more tokens per run, and its cloud dollar cost has not
+been separately measured. **No per-run, per-day, or per-month cost estimate
+exists yet for the actual production configuration** — this is a known gap,
+not an assumption of low cost.
+
+Provider list prices observed at test time (subject to change by the
+provider; not independently re-verified against a live pricing page as of
+this writing):
+
+| Model | Input (per 1M tokens) | Output (per 1M tokens) |
+|---|---:|---:|
+| DeepSeek V4.1 Flash Cloud | ≈ $0.30 | ≈ $1.20 |
+| Mistral Large 3 Cloud | ≈ $0.50 | ≈ $1.50 |
+| Nemotron 3 Super Cloud | ≈ $0.015 | ≈ $0.60 |
+| Gemma 4 31B Cloud | partly covered by Ollama free-tier credits during testing | partly covered by Ollama free-tier credits during testing |
+
+These are empirical development observations and provider list prices
+observed at test time, not a guarantee of current or future pricing — do not
+derive an exact per-run cost from them without checking the provider's
+current pricing page.
 
 ### What these benchmarks do not prove
 
@@ -1306,6 +1535,70 @@ similarly provider- and load-dependent.
 
 The following ideas are planned or under evaluation and should not be
 considered part of the implemented architecture until they are completed.
+
+### Historical pilot batch (Market-only) — in progress
+
+A larger Market-only historical batch (on the order of **~140
+recommendations**) is currently running. It is **not yet closed**. The first
+20-case checkpoint is reported above as a provisional engineering result; no
+conclusion from the full batch is reported yet.
+
+- The four Nemotron historical cases documented in
+  [Cloud model experiment](#cloud-model-experiment-historical-market-only-january-2026)
+  above are part of this batch.
+- Goal: compare **Trader-only** recommendations against
+  **Portfolio-Manager-filtered** recommendations. The [Decision consistency
+  across reviewers](#decision-consistency-across-reviewers) cases so far show
+  the Portfolio Manager using `REDUCE_RISK` often; the open question is
+  whether that conservatism is filtering out losing trades, winning trades,
+  or both — not yet whether the Portfolio Manager "works" or "should be
+  removed".
+- Evaluation should not stop at win rate: payoff/returns need to be
+  considered too, with risk-adjusted comparison as a later step once there
+  is enough settled data.
+
+Methodology constraints:
+
+- **Market-only is intentional.** Historical News/Social are not used because
+  no point-in-time archived evidence exists yet for these historical dates;
+  adding them before such an archive exists would risk leaking present-day
+  information into a historical run.
+- Fundamentals should not be added until historical point-in-time semantics
+  for that data path are specifically audited.
+- Historical backtests must remain separate from the prospective
+  recommendation ledger (see [RecommendationRecord (v1)](#recommendationrecord-v1)) —
+  a backtest recommendation must never be written into the same ledger as a
+  live, prospective one.
+
+### Sequential backtest (after the historical pilot batch)
+
+A brief TODO, not an implemented design — planned for after the batch above
+closes:
+
+- Simulate portfolio state day by day, so a new recommendation can interact
+  with an already-open position instead of being evaluated independently.
+- Compare a plan-locked policy (hold the original Trader plan) against a
+  daily-adaptive policy (re-evaluate as new recommendations arrive).
+- Study what to do when a later recommendation contradicts an open position.
+- Add position sizing and transaction costs only once the above works.
+
+### Upstream review candidates
+
+To be prioritized **after** the historical pilot batch above closes:
+
+- Review and selectively evaluate upstream TradingAgents' `chatgpt`
+  provider (ChatGPT without a traditional API key, per upstream's own
+  implementation) in Generation, Review, and possibly the full pipeline,
+  and decide empirically where — if anywhere — it adds value. It has not
+  been tested in TradeProof yet, and it is not assumed to become the new
+  routing.
+- Other upstream changes worth reviewing later: a concurrent-write fix for
+  the memory/decision log; Yahoo Search as a Yahoo News fallback; parallel
+  Analyst execution; `max_tool_rounds`; SEC/FRED/Fundamentals correctness
+  fixes; per-role provider selection; HTML report output.
+- TradeProof has diverged substantially from upstream; the plan is
+  selective porting of specific useful changes, not tracking upstream
+  version-for-version.
 
 ### Position sizing
 
