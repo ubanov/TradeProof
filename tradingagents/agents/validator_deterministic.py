@@ -194,10 +194,14 @@ def check_trade_geometry(
     of above produced a plausible-looking but structurally non-executable
     plan, undetected because nothing checked direction, only arithmetic).
 
-    ``reference_entry`` (e.g. the Trader's own calculated reference for an
-    entry range) takes precedence when given; otherwise the entry is
-    resolved via ``entry_reference`` exactly like ``trade_metrics.py`` does,
-    covering a single point AND a genuine range identically. A direction
+    When ``entry_low``/``entry_high`` are BOTH given (a genuine entry
+    range), geometry is checked against the FULL range -- the worst-case
+    bound a real fill could land on, not just a single reference point --
+    regardless of whether ``reference_entry`` is also given (that value
+    still matters for metrics, never for this check once a real range
+    exists; see ``trade_geometry_violations``). Otherwise, ``reference_entry``
+    takes precedence when given; failing that, the entry is resolved via
+    ``entry_reference`` exactly like ``trade_metrics.py`` does. A direction
     that isn't LONG/BUY/BULL or SHORT/SELL/BEAR (Hold, unrecognized, or
     absent), a missing/unresolvable entry, or a missing stop_loss/
     take_profit individually all mean nothing is checked for that
@@ -206,13 +210,18 @@ def check_trade_geometry(
     entry = reference_entry if reference_entry is not None else entry_reference(
         entry_price, entry_low, entry_high
     )
-    violations = trade_geometry_violations(direction, entry, stop_loss, take_profit)
+    violations = trade_geometry_violations(
+        direction, entry, stop_loss, take_profit,
+        entry_low=entry_low, entry_high=entry_high,
+    )
     if not violations:
         return None
     return ValidationFinding(
         category=ValidationCategory.TRADE_GEOMETRY_ERROR,
         claim="; ".join(violations),
-        evidence=[str(v) for v in (entry, stop_loss, take_profit) if v is not None],
+        evidence=[
+            str(v) for v in (entry, entry_low, entry_high, stop_loss, take_profit) if v is not None
+        ],
         reason=(
             "A directional plan's stop-loss and take-profit must be on the "
             "correct side of entry for the trade's direction -- a structural "

@@ -155,6 +155,163 @@ def test_bear_entry_range_invalid_geometry_fails():
     assert finding.category == ValidationCategory.TRADE_GEOMETRY_ERROR
 
 
+# --- Range hardening: full [low, high] bounds, not just the midpoint -------
+# (NVDA 2026-01-07, second run: a BULL thesis with entry_low=186.00,
+# entry_high=187.50, stop_loss=186.00 (== entry_low), take_profit=192.50
+# read as valid under the midpoint-only check -- 186.00 < 186.75 < 192.50 --
+# even though a fill at the low end of the range would trigger the stop
+# immediately. The rule now requires the stop/target to clear the WORST-CASE
+# bound of the range, not just its midpoint/reference.)
+
+
+@pytest.mark.unit
+def test_nvda_second_run_regression_bull_stop_equal_to_entry_low_fails():
+    """The exact second-run regression."""
+    violations = trade_geometry_violations(
+        "BULL", entry=186.75, stop_loss=186.0, take_profit=192.5,
+        entry_low=186.0, entry_high=187.5,
+    )
+    assert violations
+    finding = check_trade_geometry(
+        "BULL", entry_low=186.0, entry_high=187.5, stop_loss=186.0, take_profit=192.5,
+    )
+    assert finding is not None
+    assert finding.category == ValidationCategory.TRADE_GEOMETRY_ERROR
+
+
+@pytest.mark.unit
+def test_nvda_second_run_regression_rejected_by_apply_validated_trade_plan_changes():
+    """Same regression, through the structural guard that rejects it before
+    it ever reaches the canonical thesis (section 3 of the original task)."""
+    thesis = {
+        "direction": "BULL",
+        "entry": {"type": "range", "price": None, "low": 186.4, "high": 189.0},
+        "take_profit": 195.03,
+        "stop_loss": 182.9,
+        "conviction": {"total": 60},
+    }
+    review = {
+        "trade_plan_changes": {
+            "entry": {"action": "REVISE", "new": None, "old": None, "reason": ""},
+            "stop_loss": {"action": "REVISE", "new": 186.0, "old": 182.9, "reason": "tighter stop"},
+            "take_profit": {"action": "REVISE", "new": 192.5, "old": 195.03, "reason": "nearer target"},
+        },
+        "conviction_after": 60,
+    }
+    # Simulate the entry itself also narrowing to 186.00-187.50 this round --
+    # apply_trade_plan_changes only revises entry via a single new point, so
+    # exercise the guard directly against the resulting candidate shape.
+    from tradingagents.agents.researchers.thesis_flow import apply_trade_plan_changes
+
+    candidate, _ = apply_trade_plan_changes(thesis, review)
+    candidate["entry"] = {"type": "range", "price": None, "low": 186.0, "high": 187.5}
+    violations = trade_geometry_violations(
+        candidate["direction"],
+        entry_reference(None, candidate["entry"]["low"], candidate["entry"]["high"]),
+        candidate["stop_loss"], candidate["take_profit"],
+        entry_low=candidate["entry"]["low"], entry_high=candidate["entry"]["high"],
+    )
+    assert violations  # confirms the shape is genuinely invalid under the new rule
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stop_loss, take_profit, expect_fail",
+    [
+        (99, 110, False),   # clears both worst-case bounds -- PASS
+        (100, 110, True),   # stop_loss == entry_low -- FAIL
+        (99, 105, True),    # take_profit == entry_high -- FAIL
+    ],
+)
+def test_long_range_100_105_matrix(stop_loss, take_profit, expect_fail):
+    violations = trade_geometry_violations(
+        "LONG", entry=102.5, stop_loss=stop_loss, take_profit=take_profit,
+        entry_low=100, entry_high=105,
+    )
+    assert bool(violations) is expect_fail
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "stop_loss, take_profit, expect_fail",
+    [
+        (106, 95, False),   # clears both worst-case bounds -- PASS
+        (105, 95, True),    # stop_loss == entry_high -- FAIL
+        (106, 100, True),   # take_profit == entry_low -- FAIL
+    ],
+)
+def test_short_range_100_105_matrix(stop_loss, take_profit, expect_fail):
+    violations = trade_geometry_violations(
+        "SHORT", entry=102.5, stop_loss=stop_loss, take_profit=take_profit,
+        entry_low=100, entry_high=105,
+    )
+    assert bool(violations) is expect_fail
+
+
+@pytest.mark.unit
+def test_metrics_invalid_for_the_nvda_second_run_bull_range():
+    """compute_trade_metrics(...).geometry_valid must also treat this as
+    invalid -- not just the Validator-facing check."""
+    metrics = compute_trade_metrics(
+        direction="BULL", entry_low=186.0, entry_high=187.5,
+        stop_loss=186.0, take_profit=192.5, atr=1.5,
+    )
+    assert metrics.geometry_valid is False
+    assert metrics.reward_risk is None
+    assert metrics.risk is None
+    assert metrics.reward is None
+
+
+@pytest.mark.unit
+def test_metrics_valid_for_a_genuinely_clear_bull_range():
+    metrics = compute_trade_metrics(
+        direction="BULL", entry_low=100, entry_high=105,
+        stop_loss=99, take_profit=110, atr=2,
+    )
+    assert metrics.geometry_valid is True
+    assert metrics.reward_risk is not None
+
+
+@pytest.mark.unit
+def test_range_hardening_does_not_affect_point_entry_behavior():
+    """A single point entry keeps the simpler stop < entry < target check --
+    the range rule only activates when both entry_low and entry_high are
+    given."""
+    assert trade_geometry_violations("LONG", entry=100, stop_loss=95, take_profit=110) == []
+    assert trade_geometry_violations("LONG", entry=100, stop_loss=100, take_profit=110) != []
+    metrics = compute_trade_metrics(
+        direction="LONG", entry_price=100, stop_loss=95, take_profit=110, atr=2,
+    )
+    assert metrics.geometry_valid is True
+
+
+@pytest.mark.unit
+def test_range_hardening_one_sided_range_falls_back_to_point_style():
+    """Only one bound known is not a genuine range (matches entry_reference()'s
+    own one-sided fallback) -- the simpler point-style check applies using
+    whichever bound is present as the reference."""
+    assert trade_geometry_violations(
+        "LONG", entry=100, stop_loss=95, take_profit=110, entry_low=100, entry_high=None,
+    ) == []
+
+
+@pytest.mark.unit
+def test_range_hardening_hold_never_false_positive():
+    assert trade_geometry_violations(
+        "HOLD", entry=102.5, stop_loss=186.0, take_profit=192.5, entry_low=186.0, entry_high=187.5,
+    ) == []
+    assert check_trade_geometry(
+        "Hold", entry_low=186.0, entry_high=187.5, stop_loss=186.0, take_profit=192.5,
+    ) is None
+
+
+@pytest.mark.unit
+def test_range_hardening_null_fields_never_false_positive():
+    assert trade_geometry_violations(
+        "LONG", entry=102.5, stop_loss=None, take_profit=None, entry_low=100, entry_high=105,
+    ) == []
+
+
 @pytest.mark.unit
 def test_reference_entry_takes_precedence_over_point_or_range():
     """Trader's own reference_entry (e.g. a calculated range reference)
@@ -166,6 +323,22 @@ def test_reference_entry_takes_precedence_over_point_or_range():
     assert check_trade_geometry(
         "SELL", entry_price=50, reference_entry=100, stop_loss=105, take_profit=90,
     ) is None
+
+
+@pytest.mark.unit
+def test_a_genuine_range_wins_over_reference_entry_for_geometry():
+    """Once entry_low/entry_high are BOTH given, the range rule applies
+    regardless of a reference_entry override -- reference_entry still only
+    matters when there is no genuine range at all (see the test above)."""
+    # reference_entry=186.75 (the midpoint) alone would read this as valid
+    # (186.0 < 186.75 < 192.5) -- but the range rule correctly rejects it
+    # because stop_loss sits exactly on entry_low.
+    finding = check_trade_geometry(
+        "BULL", entry_low=186.0, entry_high=187.5, reference_entry=186.75,
+        stop_loss=186.0, take_profit=192.5,
+    )
+    assert finding is not None
+    assert finding.category == ValidationCategory.TRADE_GEOMETRY_ERROR
 
 
 # --- Null fields / Hold / no direction: never a false positive --------------

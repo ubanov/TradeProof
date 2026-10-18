@@ -52,21 +52,74 @@ def trade_geometry_violations(
     entry: float | None,
     stop_loss: float | None = None,
     take_profit: float | None = None,
+    entry_low: float | None = None,
+    entry_high: float | None = None,
 ) -> list[str]:
     """Human-readable violations of directional trade geometry.
 
     LONG/BUY/BULL: ``stop_loss`` must be below ``entry``, ``take_profit``
     above it. SHORT/SELL/BEAR: the reverse. Returns ``[]`` (never invalid)
     when the direction doesn't resolve to LONG/SHORT (e.g. Hold), when
-    ``entry`` is unresolvable, or when a given level is simply absent -- a
-    missing field is never treated as a violation, and no field is ever
-    invented or corrected here.
+    ``entry``/the range is unresolvable, or when a given level is simply
+    absent -- a missing field is never treated as a violation, and no field
+    is ever invented or corrected here.
+
+    When ``entry_low``/``entry_high`` are BOTH given (a genuine entry
+    RANGE), the stricter range-aware rule applies INSTEAD of checking only
+    the single reference ``entry`` point (its midpoint, or an explicit
+    ``reference_entry`` override -- see ``check_trade_geometry``):
+
+        LONG:  stop_loss < entry_low <= entry_high < take_profit
+        SHORT: take_profit < entry_low <= entry_high < stop_loss
+
+    Any price inside ``[entry_low, entry_high]`` is a valid fill for the
+    plan, so the stop/target must clear the WORST-CASE bound (``entry_low``
+    for a LONG's stop, ``entry_high`` for a LONG's target; reversed for
+    SHORT) -- the midpoint alone is not enough: a real regression (NVDA
+    2026-01-07, second run) had a BULL thesis whose ``stop_loss`` equaled
+    its own ``entry_low`` (186.00), which the midpoint/reference check
+    (186.00 < 186.75 < 192.50) read as valid even though a fill at the low
+    end of the range would trigger the stop immediately. ``entry`` itself
+    (and ``entry_reference()``) is unaffected and still used for metrics
+    (risk/reward at the reference entry) -- this only changes what GEOMETRY
+    validation checks against. A one-sided range (only one bound known)
+    falls back to the simpler point-style check below, exactly like
+    ``entry_reference()`` itself does for metrics.
     """
     resolved = resolve_trade_direction(direction)
-    if resolved is None or entry is None:
+    if resolved is None:
+        return []
+    is_long = resolved == "LONG"
+
+    if entry_low is not None and entry_high is not None:
+        violations = []
+        if stop_loss is not None:
+            if is_long and stop_loss >= entry_low:
+                violations.append(
+                    f"stop_loss={stop_loss} is not below entry_low={entry_low} "
+                    "for a LONG/BUY/BULL entry range"
+                )
+            elif not is_long and stop_loss <= entry_high:
+                violations.append(
+                    f"stop_loss={stop_loss} is not above entry_high={entry_high} "
+                    "for a SHORT/SELL/BEAR entry range"
+                )
+        if take_profit is not None:
+            if is_long and take_profit <= entry_high:
+                violations.append(
+                    f"take_profit={take_profit} is not above entry_high={entry_high} "
+                    "for a LONG/BUY/BULL entry range"
+                )
+            elif not is_long and take_profit >= entry_low:
+                violations.append(
+                    f"take_profit={take_profit} is not below entry_low={entry_low} "
+                    "for a SHORT/SELL/BEAR entry range"
+                )
+        return violations
+
+    if entry is None:
         return []
 
-    is_long = resolved == "LONG"
     violations = []
     if stop_loss is not None:
         if is_long and stop_loss >= entry:
@@ -193,7 +246,10 @@ def compute_trade_metrics(
 
     geometry_valid = None
     if direction is not None:
-        geometry_valid = not trade_geometry_violations(direction, entry, stop_loss, take_profit)
+        geometry_valid = not trade_geometry_violations(
+            direction, entry, stop_loss, take_profit,
+            entry_low=entry_low, entry_high=entry_high,
+        )
         if not geometry_valid:
             return TradeMetrics(entry_reference=entry, geometry_valid=False)
 

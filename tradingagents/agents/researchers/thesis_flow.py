@@ -301,6 +301,13 @@ def apply_validated_trade_plan_changes(
     violations = trade_geometry_violations(
         candidate.get("direction"), candidate_entry_ref,
         candidate.get("stop_loss"), candidate.get("take_profit"),
+        # A genuine entry RANGE (low/high both set, no single point price) is
+        # checked against its full worst-case bounds, not just the midpoint
+        # reference -- see trade_geometry_violations and the NVDA 2026-01-07
+        # (second run) regression: a BULL thesis whose stop_loss equaled its
+        # own entry_low read as valid under the midpoint-only check.
+        entry_low=entry.get("low") if entry.get("type") == "range" else None,
+        entry_high=entry.get("high") if entry.get("type") == "range" else None,
     )
     if not violations:
         return candidate, retired, None
@@ -309,7 +316,10 @@ def apply_validated_trade_plan_changes(
         category=ValidationCategory.TRADE_GEOMETRY_ERROR,
         claim="; ".join(violations),
         evidence=[
-            str(v) for v in (candidate_entry_ref, candidate.get("stop_loss"), candidate.get("take_profit"))
+            str(v) for v in (
+                candidate_entry_ref, entry.get("low"), entry.get("high"),
+                candidate.get("stop_loss"), candidate.get("take_profit"),
+            )
             if v is not None
         ],
         reason=(

@@ -197,12 +197,31 @@ def test_5c_genuinely_concurrent_threads_under_a_frozen_clock_never_collide(tmp_
 
 
 @pytest.mark.unit
-def test_distinct_clock_readings_still_use_the_bare_timestamp_no_unnecessary_suffix():
-    """No collision -- the common case -- must not gain a spurious suffix."""
-    import tempfile
-    from pathlib import Path
+def test_distinct_clock_readings_still_use_the_bare_timestamp_no_unnecessary_suffix(
+    tmp_path, monkeypatch,
+):
+    """No collision -- the common case -- must not gain a spurious suffix.
 
-    with tempfile.TemporaryDirectory() as tmp:
-        run_dir = cli_run.automatic_run_dir(Path(tmp))
-        assert "_01" not in run_dir.name
-        assert run_dir.exists()
+    Previously used the real, unmocked clock and asserted ``"_01" not in
+    run_dir.name`` -- a substring check that is a false positive whenever
+    the real wall-clock hour, minute, or second happens to contain "01"
+    (e.g. run at 01:23:45, or at 10:01:23): that "01" is legitimately part
+    of the ``HHMMSS`` block, not an appended collision suffix, and the test
+    failed with no actual bug. Every other test in this file already
+    freezes the clock via ``_freeze_clock`` -- this one simply never did.
+    Frozen to an instant whose hour is deliberately 01 (matching the exact
+    failure mode) and asserting the full, exact expected name: a suffix
+    would appear only as a trailing ``_NN`` the frozen microsecond timestamp
+    does not itself contain, so exact equality is unambiguous regardless of
+    what digits appear inside the timestamp.
+    """
+    _freeze_clock(monkeypatch, _datetime_module.datetime(2026, 1, 19, 1, 34, 7, 480406))
+    run_dir = cli_run.automatic_run_dir(tmp_path)
+    assert run_dir.name == "20260119_013407_480406"
+    assert run_dir.exists()
+    # Structural, not substring-based: a real suffix is always a trailing
+    # "_" + exactly two digits appended AFTER the full timestamp -- "01"
+    # inside HHMMSS (positions 9-14) can never match this.
+    import re
+
+    assert re.search(r"_\d{2}$", run_dir.name) is None
