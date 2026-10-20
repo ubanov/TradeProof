@@ -405,8 +405,8 @@ function Invoke-TradingAgentsCli {
     SAME live output still reaches the console while also landing in
     $Script:LastCliOutput. Returns the child process's exit code either way.
 
-    Two real-run bugs fixed here, both specific to the -CaptureOutput path
-    (Start-Process above was never affected by either):
+    Three real-run bugs fixed here, all specific to the -CaptureOutput path
+    (Start-Process above was never affected by any of them):
 
     1. stdout is captured WITHOUT merging stderr (no `2>&1`): merging a
        native command's stderr into a PowerShell pipeline wraps each line
@@ -433,6 +433,30 @@ function Invoke-TradingAgentsCli {
        number. Out-Host forces live display (preserving "visible loop")
        while producing no further pipeline output of its own, so nothing
        leaks into $exitCode.
+    3. $PSNativeCommandUseErrorActionPreference is forced to $false for the
+       duration of the call, on top of $ErrorActionPreference='Continue'
+       (fix 1's "defense in depth"): PowerShell has always converted a
+       directly-invoked native command's stderr OUTPUT into an ErrorRecord
+       independently of fix 1's stream merging (a plain `& $exe` writes to
+       stderr, not just `2>&1`-merged ones), and on PowerShell 7.3+ that
+       variable additionally converts the native command's EXIT CODE itself
+       into a terminating NativeCommandExitException. Confirmed by a real
+       run, AFTER fix 1 and 2 were already in place: two tickers (MSFT, LLY)
+       were still reported as "EXCEPTION: <ticker>: 1 trailing bar(s) ...
+       have no closing price; using ... as the latest close." with exit=-1
+       -- the exact wording of the ohlcv.py logger.warning() call (see
+       tradingagents/dataflows/vendors/yahoo/ohlcv.py), never a raise, so
+       PowerShell -- not Python -- turned it into a terminating error.
+       Explicitly disabling it here (rather than relying on
+       $ErrorActionPreference alone) is the documented way to stop a native
+       command's stderr/exit code from ever becoming a PowerShell exception.
+       Guarded with Get-Variable: this preference variable does not exist on
+       PowerShell versions before 7.3, and Set-StrictMode -Version Latest
+       (set globally at the top of this script) turns reading an unset
+       variable into an error, so its prior value is only read (to restore
+       afterwards) when the variable already exists; on older PowerShell
+       versions, setting it here simply creates a harmless, function-scoped
+       variable the engine never consults.
     #>
     param(
         [Parameter(Mandatory)][string[]]$Arguments,
@@ -458,6 +482,12 @@ function Invoke-TradingAgentsCli {
     # guarantees it is never escalated to terminating for the duration of
     # THIS call only, restored immediately after.
     $ErrorActionPreference = 'Continue'
+    # Fix 3 (see docstring): explicitly stop PowerShell 7.3+ from converting
+    # this native command's stderr output or exit code into a terminating
+    # exception, regardless of $ErrorActionPreference.
+    $nativeEapVar = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
+    if ($nativeEapVar) { $prevNativeEap = $nativeEapVar.Value }
+    $PSNativeCommandUseErrorActionPreference = $false
     Push-Location $RepoRoot
     try {
         & $exe @fullArgs | Tee-Object -Variable Script:LastCliOutput | Out-Host
@@ -465,6 +495,7 @@ function Invoke-TradingAgentsCli {
     } finally {
         Pop-Location
         $ErrorActionPreference = $prevEap
+        if ($nativeEapVar) { $PSNativeCommandUseErrorActionPreference = $prevNativeEap }
     }
 }
 

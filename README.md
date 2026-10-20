@@ -11,6 +11,27 @@ not a source of guaranteed or infallible financial recommendations. See the
 disclaimer under [TradingAgents Framework](#tradingagents-framework), which
 applies in full here.
 
+## Project status: concluded — no validated trading edge found
+
+This project is closed as a trading-strategy research effort. Every
+approach tried — the original multi-agent LLM pipeline (Analysts → Bull/Bear
+→ Research Manager → Trader → Risk → Portfolio Manager), three iterations of
+the simpler `run2` LLM pipeline, and finally an offline, deterministic
+quantitative benchmark of eight untuned feature-based rules — failed to beat
+a naive majority-class baseline by a margin that survives its own confidence
+interval, on every historical sample examined. See
+[Experimental research](#experimental-research) for the full results and
+methodology, including why each hypothesis (including a reversal/contrarian
+one suggested along the way) was retired.
+
+Nothing here demonstrates that a predictive edge is impossible in this data —
+only that it was not found by the approaches tried, at the sample sizes
+tried. The codebase remains available as a reference implementation of
+structured multi-agent LLM orchestration, deterministic validation, and
+point-in-time-safe historical experiment design, but **not as a source of a
+validated trading strategy**, and no further development toward "making the
+signal work" is planned.
+
 ## Summary
 
 The sections below go into a lot of detail. For a newcomer, the short
@@ -1613,6 +1634,132 @@ Local development measurements in this README were produced on:
 The local Qwen and Gemma timings above should therefore be read as measurements
 of this environment, not general model benchmarks. Cloud-provider timings are
 similarly provider- and load-dependent.
+
+## Experimental research
+
+TradeProof has tried several different architectures looking for a
+demonstrable predictive edge. None of them has produced one yet. This section
+documents what was tried, what was found, and why each hypothesis was
+retired or changed — a negative result is still a result, not something to
+omit.
+
+### Original multi-agent architecture
+
+The main pipeline documented throughout this README (Analysts → Bull/Bear
+debate → Research Manager → Trader → three independent Risk reviewers →
+Portfolio Manager) was run end-to-end on NVDA across 35 clean historical
+dates, with Decision Memory disabled (see
+[Decision memory isolation](#decision-memory-isolation)) so no run could see
+another run's outcome.
+
+- Roughly 35% directional accuracy on the signals that were evaluable (i.e.
+  excluding HOLD/NO_POSITION outcomes) — not distinguishable from noise at
+  this sample size.
+- The Portfolio Manager was extremely conservative and blocked nearly every
+  trade it was offered, regardless of how the debate concluded.
+
+This was a signal-quality experiment, not a financial backtest — no P&L, no
+position sizing, no execution/slippage model. The result is that this
+architecture has not demonstrated edge. It remains the main, most heavily
+instrumented pipeline in this repo (auditability, Validator,
+RecommendationRecord, etc. are all real and tested), but it should not be
+read as a profitable strategy.
+
+### run2: market-only, simpler architecture
+
+[`run2`](tradingagents/run2/) ("First Barrier experiment") was built to ask a
+narrower, cheaper question with a much simpler architecture, to check whether
+any demonstrable signal exists before adding more complexity. It went
+through several iterations, each retired for a concrete, observed reason:
+
+1. **Market regime + directional signal + Challenger**, predicting
+   LONG/SHORT/NO_POSITION over a 40-session horizon with a confidence
+   threshold. NO_POSITION became the dominant output whenever evidence was
+   mixed — the threshold effectively hid the question being asked.
+2. **First Barrier (+5%/-5%)** with the same three-way output. Same problem:
+   NO_POSITION remained dominant.
+3. **Binary First Barrier predictor** (current): the model is forced to
+   choose LONG or SHORT — "which barrier, +5% or -5% from the reference
+   price, is reached first within the next 40 sessions?" — with no
+   abstention option and no confidence threshold gating the decision.
+   `UNRESOLVED` exists only for a technical/structural pipeline failure
+   (e.g. a stage invalid even after its one repair attempt), never for
+   market uncertainty.
+
+On the 12-date NVDA development set used while building this binary version:
+
+```text
+2/12 correct = 16.67%
+```
+
+This number must be read carefully:
+
+- those 12 dates are **development observations**, used while iterating on
+  the architecture and prompts — they are **not** an independent validation
+  set;
+- inverting every one of those 12 predictions would give 10/12 correct, but
+  that is a **post-hoc observation on the same 12 dates used to shape the
+  hypothesis**, not a validated contrarian strategy;
+- a `contrarian_momentum` rule (inverting the deterministic momentum
+  baseline, not the LLM) is included explicitly in the offline quantitative
+  benchmark below specifically to check whether that reversal pattern holds
+  on a larger, independent historical sample — with its parameters frozen
+  before looking at the results.
+
+### Quantitative baseline benchmark (no LLM)
+
+Before spending more effort on LLM prompting, `tradingagents/run2/quant_benchmark.py`
+checks whether run2's own deterministic market features
+(`tradingagents/run2/market_data.py::compute_market_features`) contain any
+simple predictive signal at all for the First Barrier target. It is entirely
+offline and deterministic — no LLM call anywhere — and compares eight frozen,
+untuned rules (reusing the `momentum`/`moving_average` baselines unmodified,
+plus `return20`/`return60`, their sign-inverted `contrarian20`/`contrarian60`
+counterparts, `contrarian_momentum`, and a fixed-threshold `rsi_contrarian`)
+against the real market outcome from the same First Barrier evaluator run2's
+LLM path uses, over a historical date range sampled roughly once per trading
+week (`--step-sessions 5`) to avoid highly correlated consecutive samples.
+
+**Result (NVDA, 2022-01-03 to 2025-12-31, step 5, horizon 40 sessions,
+barrier ±5%, 201 observations):** actual outcomes were 110 LONG / 89 SHORT /
+2 AMBIGUOUS / 0 NO_POSITION / 0 INCOMPLETE, so the majority-class baseline
+(always predict LONG) already scores **55.3%**. None of the eight rules beat
+that in any way that survives its own 95% confidence interval:
+
+| Baseline | Coverage | Accuracy | 95% CI |
+|---|---:|---:|---:|
+| momentum | 70.1% | 55.7% | [47.4%, 63.7%] |
+| moving_average | 60.2% | 55.8% | [46.9%, 64.4%] |
+| return20 | 100.0% | 53.3% | [46.3%, 60.1%] |
+| return60 | 99.0% | 57.4% | [50.4%, 64.1%] |
+| contrarian20 | 100.0% | 46.7% | [39.9%, 53.7%] |
+| contrarian60 | 99.0% | 42.6% | [35.9%, 49.6%] |
+| contrarian_momentum | 70.1% | 44.3% | [36.3%, 52.6%] |
+| rsi_contrarian | 10.9% | 40.9% | [23.3%, 61.3%] |
+
+The best performers (`momentum`, `moving_average`, `return60`) sit
+essentially on top of the majority-class baseline, well inside each other's
+confidence intervals — indistinguishable from "always guess the more common
+direction." The `contrarian_momentum` rule, included specifically to check
+whether the reversal pattern suggested by the 12-date LLM development set
+would hold on a larger, independent sample, scored **44.3% — below the
+majority baseline**, actively refuting that hypothesis rather than
+supporting it.
+
+### What this does not show, and what it does
+
+None of the above is a backtest with position sizing, execution, slippage, or
+risk-adjusted returns, and none of it should be read as investment advice. It
+also does not prove no edge can ever exist in this data — a larger sample,
+other tickers, or a different target could still show something these eight
+frozen rules do not.
+
+What it does show, honestly: across every approach tried in this fork — the
+original multi-agent LLM pipeline, three iterations of the simpler `run2`
+LLM pipeline, and now eight independent, untuned, deterministic
+feature-based rules — nothing has cleared the bar of "better than guessing
+the more common outcome" by a margin that survives its own confidence
+interval. That is the basis for the project status below.
 
 ## Planned experiments
 

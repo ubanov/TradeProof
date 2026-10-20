@@ -36,6 +36,7 @@ from tradingagents.evidence_archive import (
 )
 from tradingagents.pm_replay import run_pm_replay
 from tradingagents.portfolio import load_portfolio
+from tradingagents.run2.pipeline import run_run2_analysis
 from tradingagents.run_seed import resolve_base_seed, validate_configured_seed
 
 # Batch defaults so only --tickers/--tickers-file is required: each is an
@@ -926,6 +927,90 @@ def replay_pm_command(
         echo(f"Validator model: {record.validator.name}")
     echo(f"Rating: {record.rating or 'unparsed'}; Disposition: {record.disposition or 'unparsed'}")
     echo(f"PMReplayRecord: {written_path}")
+
+
+@app.command("run2")
+def run2_command(
+    ticker: str = typer.Option(..., "--ticker", help="Ticker symbol to analyze."),
+    date: str = typer.Option(..., "--date", help="Analysis date, YYYY-MM-DD. Cannot be in the future."),
+    language: str | None = typer.Option(
+        None, "--language", help="Output language. Defaults to the configured output_language.",
+    ),
+    generation_llm: str | None = typer.Option(
+        None, "--generation-llm",
+        help="Model for the Market Regime Analyzer and First Barrier Signal Analyst stages. "
+        "Defaults to the configured generation model.",
+    ),
+    generation_reasoning_effort: str | None = typer.Option(
+        None, "--generation-reasoning-effort", help="Reasoning effort for the generation model.",
+    ),
+    validator_llm: str | None = typer.Option(
+        None, "--validator-llm",
+        help="Optional model used for each stage's one repair attempt when structured "
+        "output fails. Defaults to the configured validator model; when none resolves, "
+        "each stage repairs itself.",
+    ),
+    seed: int = typer.Option(
+        0, "--seed", help="Best-effort reproducibility seed. 0 auto-generates one.",
+    ),
+    trace_llm: bool = typer.Option(
+        False, "--trace-llm", help="Write each stage's raw prompt/response under <run_dir>/debug/.",
+    ),
+    horizon_sessions: int | None = typer.Option(
+        None, "--horizon-sessions", help="Forecast horizon in trading sessions. Default: RUN2_HORIZON_SESSIONS (40).",
+    ),
+    barrier_pct: float | None = typer.Option(
+        None, "--barrier-pct",
+        help="Barrier distance from the reference price, in percent. Default: RUN2_BARRIER_PCT (5.0).",
+    ),
+    run2_root: Path | None = typer.Option(  # noqa: B008 - Typer option declaration
+        None, "--run2-root",
+        help="Override run2's storage root. Defaults to $TRADINGAGENTS_RUN2_ROOT, or "
+        "~/.tradingagents/run2.",
+    ),
+):
+    """Experimental, market-only binary First Barrier pipeline (see fork
+    README: "run2").
+
+    From the reference price on `--date`, predicts which barrier
+    (+`--barrier-pct`%/-`--barrier-pct`%) will be reached FIRST within the
+    next `--horizon-sessions` trading sessions -- LONG or SHORT. This is a
+    forced binary choice: NO_POSITION is not a valid prediction. This is not
+    a prediction of where the price ends up at the end of the horizon, only
+    which barrier is crossed first.
+
+    Deliberately separate from `tradingagents run`: no news, fundamentals,
+    social media, Decision Memory, Bull/Bear debate, Research Manager,
+    Trader, Risk, or Portfolio Manager -- and a separate storage root, so
+    results are never mixed with `run`'s own. There is no confidence
+    threshold: a structurally valid LONG/SHORT signal is the final decision
+    outright. The only other possible outcome is UNRESOLVED, which
+    represents exclusively a technical/structural pipeline failure, never
+    market uncertainty. V1 forecasts the first barrier only; it does not
+    plan a trade (no entry/stop/target/sizing).
+    """
+    echo = timestamped_echo()
+    try:
+        result, result_path = run_run2_analysis(
+            ticker=ticker,
+            analysis_date=date,
+            language=language,
+            generation_llm=generation_llm,
+            generation_reasoning_effort=generation_reasoning_effort,
+            validator_llm=validator_llm,
+            seed=seed,
+            trace_llm=trace_llm,
+            horizon_sessions=horizon_sessions,
+            barrier_pct=barrier_pct,
+            root=run2_root,
+        )
+    except Exception as exc:
+        echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+    final = result["final_decision"]
+    echo(f"{ticker} {date}: {final['action']} (reason: {final['reason']})")
+    echo(f"result.json: {result_path}")
 
 
 if __name__ == "__main__":

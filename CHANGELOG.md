@@ -104,6 +104,89 @@ for a summary of the architectural divergence.
   which snapshot the Portfolio Manager decided from. Backward-compatible:
   `null` on an older record or one from a run that never went through
   `execute_analysis`.
+- **`tradingagents run2` (new, experimental, separate from `run`).** A
+  second, independent, market-data-only pipeline under `tradingagents/run2/`
+  that never imports or constructs `TradingAgentsGraph`, never touches
+  news/fundamentals/social/Decision Memory, and writes to its own storage
+  root (`~/.tradingagents/run2/`, never mixed with `run`'s own). Went
+  through several designs before settling on the current one — see
+  README.md's new ["Experimental research"](README.md#experimental-research)
+  section for the full narrative and known results:
+  1. market regime + directional signal + Challenger (LONG/SHORT/NO_POSITION,
+     40-session horizon, confidence threshold) — discarded: NO_POSITION
+     became the dominant output whenever evidence was mixed, hiding the
+     question being asked;
+  2. First Barrier (+5%/-5%) with the same three-way output — same problem;
+  3. **binary First Barrier predictor (current)**: Market Regime Analyzer ->
+     Binary First Barrier Predictor -> deterministic validation ->
+     LONG/SHORT only. NO_POSITION is not a valid predictor output at all
+     (rejected at the Pydantic schema level, not merely discouraged by the
+     prompt); `UNRESOLVED` exists exclusively for a technical/structural
+     pipeline failure (a stage still invalid after its one repair attempt),
+     never for market uncertainty.
+- **Deterministic market feature pack**
+  (`tradingagents/run2/market_data.py::compute_market_features`): point-in-time
+  (`<= analysis_date`), never fabricated — multi-window returns
+  (5/10/20/40/60/120d), SMA20/50/100/200 with distances and simple slopes,
+  rolling highs/lows with distances, a simplified `recent_structure`
+  classifier, RSI14/ADX14, ATR14 (+ `%`), realized volatility (20/60d),
+  volume ratio/z-score, and drawdown-from-high fields — fed to the LLM
+  stages as pre-computed evidence (`market_features` in the prompt) so the
+  model never computes an indicator mentally, and is instructed to cite the
+  specific feature(s) behind any claim.
+- **First Barrier offline evaluator**
+  (`tradingagents/run2/evaluator.py::evaluate_first_barrier`): the ONE place
+  in run2 allowed to look at data after `analysis_date`, structurally
+  separate from the inference pipeline (never imported by it, enforced by an
+  AST-based test). Walks forward session by session using High/Low (never
+  Close alone) to determine which barrier is reached first; labels are
+  `LONG`/`SHORT`/`NO_POSITION` (neither barrier touched within the
+  horizon)/`AMBIGUOUS` (both barriers touched within the same daily bar —
+  intraday order is not inferable from daily OHLC, never guessed)/
+  `INCOMPLETE` (fewer than `horizon_sessions` real sessions have elapsed
+  yet). `classify_for_accuracy`/`score_prediction`/`score_result` bridge
+  this 5-way real-outcome vocabulary to the predictor's own binary one for
+  later accuracy analysis.
+- **Offline, LLM-free quantitative baseline benchmark**
+  (`tradingagents/run2/quant_benchmark.py`, run via
+  `python -m tradingagents.run2.quant_benchmark`): checks whether run2's own
+  deterministic market features carry any simple predictive signal at all,
+  before spending more effort on LLM prompting. Compares eight frozen,
+  untuned rules (`momentum`/`moving_average`, reused unmodified from the
+  existing baselines; `return20`/`return60`; their sign-inverted
+  `contrarian20`/`contrarian60`; `contrarian_momentum`; a fixed-threshold
+  `rsi_contrarian`) against the real market outcome from the same evaluator,
+  over observation dates sampled roughly once per trading week
+  (`--step-sessions`, default 5) to avoid highly correlated consecutive
+  samples. Reports accuracy/coverage/majority-class baseline/95% Wilson
+  confidence interval overall and broken down by year/quarter, and writes
+  `observations.csv`/`summary.json`/`summary.md`. No tuning, no
+  optimization, no training — every parameter is a frozen input.
+- **Known experimental results, and project conclusion** (see README.md's new
+  ["Experimental research"](README.md#experimental-research) section for
+  full detail and caveats): the original multi-agent pipeline showed ~35%
+  directional accuracy on evaluable NVDA signals across 35 historical dates
+  (Decision Memory disabled); the 12-date NVDA development set used while
+  building the binary First Barrier predictor scored 2/12 (16.67%) correct.
+  Neither result is distinguishable from chance at these sample sizes, and
+  neither is a validated strategy — inverting the 12-date development set's
+  predictions would give 10/12, but that is a post-hoc observation on the
+  same data used to shape the hypothesis, not independent validation. The
+  offline quantitative benchmark was then run for real (NVDA,
+  2022-01-03 to 2025-12-31, step 5, horizon 40, barrier ±5%, 201
+  observations): the majority-class baseline alone already scores 55.3%,
+  and none of the eight rules beat it by a margin surviving its own 95%
+  confidence interval (best: `return60` at 57.4%, CI [50.4%, 64.1%]); the
+  `contrarian_momentum` rule scored 44.3% — below the majority baseline,
+  actively refuting the reversal hypothesis rather than supporting it.
+  **Conclusion: no architecture tried in this fork — the original
+  multi-agent pipeline, any run2 LLM variant, or the deterministic
+  quantitative baselines — has demonstrated a predictive edge.
+  TradeProof is accordingly closed as a trading-strategy research effort**
+  (see README.md's new "Project status" section at the top of the file);
+  it remains available as a reference implementation of the multi-agent/
+  validation/point-in-time-safe-experiment architecture, not as a source of
+  a validated trading strategy.
 
 ## [0.10.1] — 2026-10-18
 
